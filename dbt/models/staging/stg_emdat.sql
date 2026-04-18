@@ -1,0 +1,23 @@
+select
+    id,
+    source,
+    source_event_id,
+    event_name,
+    main_cause,
+    date_start,
+    date_end,
+    country,
+    latitude,
+    longitude,
+    geometry,
+    deaths,
+    displaced,
+    affected,
+    severity,
+    flood_impact_index,
+    glide_number,
+    url,
+    h3_index,
+    river_basin
+from flood_events
+where source = 'emdat'
