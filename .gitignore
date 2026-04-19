@@ -1,0 +1,10 @@
+.env
+.venv/
+__pycache__/
+*.pyc
+
+# Large local raw datasets (not for git)
+data/raw/
+
+# Generated Copernicus run artifacts
+data/copernicus/manifest/
