@@ -1,0 +1,7 @@
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.env
+data/.reliefweb_last_run.txt
