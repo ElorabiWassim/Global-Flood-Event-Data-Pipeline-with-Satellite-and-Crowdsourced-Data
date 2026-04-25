@@ -25,7 +25,7 @@ default_args = {
 def task_ingest_incremental(**context):
     import sys
     sys.path.insert(0, "/opt/airflow")
-    from ingestion.reliefweb import run
+    from ingestion.reliefweb import main as run
 
     inserted = run(mode="incremental")
     context["ti"].xcom_push(key="rows_inserted", value=inserted)
@@ -37,7 +37,7 @@ def task_ingest_incremental(**context):
 def task_ingest_full(**context):
     import sys
     sys.path.insert(0, "/opt/airflow")
-    from ingestion.reliefweb import run
+    from ingestion.reliefweb import main as run
 
     inserted = run(mode="full")
     context["ti"].xcom_push(key="rows_inserted", value=inserted)

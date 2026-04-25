@@ -185,6 +185,10 @@ def main(mode: str = "incremental"):
     return inserted
 
 
+# Backward-compatible alias used by existing DAG tasks/imports.
+run = main
+
+
 if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser()

@@ -4,8 +4,8 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 class Settings(BaseSettings):
     postgres_db:       str        = "flood_pipeline"
-    postgres_user:     str
-    postgres_password: str
+    postgres_user:     str | None = None
+    postgres_password: str | None = None
     postgres_host:     str        = "localhost"
     postgres_port:     int        = 5432
     database_url:      str | None = None
@@ -21,6 +21,10 @@ class Settings(BaseSettings):
     def resolved_database_url(self) -> str:
         if self.database_url:
             return self.database_url
+        if not self.postgres_user or not self.postgres_password:
+            raise ValueError(
+                "Set DATABASE_URL or both POSTGRES_USER and POSTGRES_PASSWORD in environment."
+            )
         return (
             "postgresql+psycopg2://"
             f"{self.postgres_user}:{self.postgres_password}"
