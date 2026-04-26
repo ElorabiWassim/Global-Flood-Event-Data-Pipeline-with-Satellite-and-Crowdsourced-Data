@@ -1,7 +1,10 @@
-from pathlib import Path
 import sys
 import time
 import requests
+import pandas as pd
+from datetime import datetime, timezone
+from pathlib import Path
+from sqlalchemy import create_engine, text
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
@@ -11,12 +14,10 @@ from config.settings import settings
 from transforms.reliefweb import transform_reliefweb_record
 from validation.models.reliefweb import ReliefWebEvent
 
-from sqlalchemy import create_engine, text
-from datetime import datetime, timezone
-import pandas as pd
-
+# ── DB engine (uses Supabase URL from settings, exactly like Rabah) ────────
 engine = create_engine(settings.resolved_database_url, pool_pre_ping=True)
 
+# ── State file (tracks last run for incremental mode) ──────────────────────
 STATE_FILE = Path("data/.reliefweb_last_run.txt")
 
 INSERT_SQL = text("""
@@ -43,7 +44,7 @@ INSERT_SQL = text("""
 """)
 
 
-# ── State helpers ─────────────────────────────────────────────
+# ── State helpers ──────────────────────────────────────────────────────────
 
 def read_last_run() -> datetime | None:
     if STATE_FILE.exists():
@@ -59,7 +60,7 @@ def save_last_run(ts: datetime):
     STATE_FILE.write_text(ts.isoformat())
 
 
-# ── API ───────────────────────────────────────────────────────
+# ── API helpers ────────────────────────────────────────────────────────────
 
 def build_filter(since: datetime | None) -> dict:
     flood_filter = {"field": "type.name", "value": "Flood"}
@@ -82,15 +83,19 @@ def fetch_raw(since: datetime | None) -> list[dict]:
 
     while True:
         payload = {
-            "limit": limit, "offset": offset,
+            "limit": limit,
+            "offset": offset,
             "filter": build_filter(since),
-            "fields": {"include": ["name", "date", "country", "status", "type", "glide", "url"]},
+            "fields": {
+                "include": ["name", "date", "country", "status", "type", "glide", "url"]
+            },
             "sort": ["date.created:desc"]
         }
         resp = requests.post(
             "https://api.reliefweb.int/v2/disasters",
             params={"appname": settings.reliefweb_appname},
-            json=payload, timeout=30
+            json=payload,
+            timeout=30
         )
         if resp.status_code == 403:
             print("ERROR 403: appname not approved.")
@@ -107,8 +112,11 @@ def fetch_raw(since: datetime | None) -> list[dict]:
             cs = f.get("country", [])
             di = f.get("date", {})
             raw_date = di.get("event") or di.get("created")
+
+            # ✅ FIX: use tz_convert(None) not tz_localize(None)
+            # pd.to_datetime(..., utc=True) returns tz-aware → must use tz_convert
             try:
-                parsed_date = pd.to_datetime(raw_date, utc=True).tz_localize(None)
+                parsed_date = pd.to_datetime(raw_date, utc=True).tz_convert(None)
             except Exception:
                 parsed_date = None
 
@@ -131,7 +139,7 @@ def fetch_raw(since: datetime | None) -> list[dict]:
     return records
 
 
-# ── Main (called by Airflow) ──────────────────────────────────
+# ── Main (called by Airflow DAG, same pattern as Rabah's main()) ───────────
 
 def main(mode: str = "incremental"):
     run_time = datetime.now(timezone.utc).replace(tzinfo=None)
@@ -154,23 +162,22 @@ def main(mode: str = "incremental"):
         trans = conn.begin()
         try:
             for record in raw_records:
+                # Skip rows with no date or no ID
                 if record["date_start"] is None or not record["source_event_id"]:
                     skipped += 1
                     continue
 
+                # Transform → validate (same 3-layer pattern as Rabah)
                 payload   = transform_reliefweb_record(record, settings.h3_resolution)
                 validated = ReliefWebEvent(**payload)
 
-                result = conn.execute(INSERT_SQL, validated.model_dump())
-                if result.rowcount:
-                    inserted += result.rowcount
-                else:
-                    skipped += 1
+                conn.execute(INSERT_SQL, validated.model_dump())
+                inserted += 1
 
-                if 0 < inserted <= 5:
+                if inserted <= 3:
                     print(f"  Sample: {validated.source_event_id} | {validated.country} | {validated.date_start}")
 
-                if inserted > 0 and inserted % batch_size == 0:
+                if inserted % batch_size == 0:
                     trans.commit()
                     print(f"  Committed {inserted} rows so far...")
                     trans = conn.begin()
@@ -185,13 +192,9 @@ def main(mode: str = "incremental"):
     return inserted
 
 
-# Backward-compatible alias used by existing DAG tasks/imports.
-run = main
-
-
 if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser()
-    parser.add_argument("--mode", choices=["full", "incremental"], default="incremental")
+    parser.add_argument("--mode", choices=["full", "incremental"], default="full")
     args = parser.parse_args()
     main(mode=args.mode)
