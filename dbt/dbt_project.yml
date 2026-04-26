@@ -1,0 +1,27 @@
+name: flood_pipeline
+version: "1.0.0"
+config-version: 2
+
+profile: flood_pipeline
+
+# Folders
+model-paths: ["models"]
+seed-paths: ["seeds"]
+test-paths: ["tests"]
+analysis-paths: ["analyses"]
+macro-paths: ["macros"]
+
+target-path: "target"
+clean-targets:
+  - "target"
+  - "dbt_packages"
+
+# Per-folder materialization defaults
+models:
+  flood_pipeline:
+    staging:
+      +schema: staging
+      +materialized: view
+    marts:
+      +schema: marts
+      +materialized: view

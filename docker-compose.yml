@@ -1,0 +1,63 @@
+version: "3.9"
+
+services:
+  airflow:
+    image: apache/airflow:2.9.3-python3.11
+    container_name: flood_airflow
+    env_file:
+      - .env
+    environment:
+      AIRFLOW__CORE__EXECUTOR: SequentialExecutor
+      AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+      # Tell the DAG where the project root is mounted inside the container.
+      FLOOD_PIPELINE_ROOT: /opt/airflow
+      # Standard Airflow knob: install our deps on container startup.
+      _PIP_ADDITIONAL_REQUIREMENTS: >-
+        pandas==2.2.2 numpy==1.26.4 python-dotenv==1.0.1 requests==2.32.3
+        openpyxl==3.1.5 h3==3.7.7 SQLAlchemy==2.0.30 psycopg2-binary==2.9.9
+    volumes:
+      - ./airflow/dags:/opt/airflow/dags
+      - ./airflow/logs:/opt/airflow/logs
+      - ./airflow/plugins:/opt/airflow/plugins
+      # Mount the project source so the DAG can import scripts.* directly.
+      - ./scripts:/opt/airflow/scripts
+      - ./data:/opt/airflow/data
+      - ./schema.sql:/opt/airflow/schema.sql:ro
+      - ./.env:/opt/airflow/.env:ro
+      - ./requirements:/opt/airflow/requirements:ro
+    ports:
+      - "8081:8080"
+    command: >
+      bash -c "
+      airflow db migrate &&
+      airflow users create
+      --username admin
+      --password admin
+      --firstname Admin
+      --lastname User
+      --role Admin
+      --email admin@example.com || true &&
+      airflow standalone
+      "
+
+  api:
+    build:
+      context: .
+      dockerfile: api/Dockerfile
+    container_name: flood_api
+    env_file:
+      - .env
+    environment:
+      API_HOST: 0.0.0.0
+      API_PORT: 8000
+    volumes:
+      # Live-reload friendly: bind-mount sources during development. Comment
+      # out for a fully-baked production image.
+      - ./scripts:/app/scripts:ro
+      - ./api:/app/api:ro
+      - ./schema.sql:/app/schema.sql:ro
+    ports:
+      - "8000:8000"
+    depends_on:
+      - airflow
+    restart: unless-stopped

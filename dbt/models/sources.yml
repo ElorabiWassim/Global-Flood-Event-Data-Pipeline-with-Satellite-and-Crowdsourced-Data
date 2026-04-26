@@ -1,0 +1,25 @@
+version: 2
+
+sources:
+  - name: raw
+    description: "Raw payloads ingested from each external flood-event source."
+    schema: raw
+    tables:
+      - name: dartmouth_events
+      - name: glofas_events
+      - name: copernicus_ems_events
+      - name: emdat_events
+      - name: reliefweb_events
+      - name: ingestion_log
+
+  - name: staging
+    description: "Canonical unified flood events. Built by scripts.transform."
+    schema: staging
+    tables:
+      - name: flood_events
+        description: "One row per ingested source event after normalization."
+        columns:
+          - name: source
+            tests: [not_null]
+          - name: date_start
+            tests: [not_null]

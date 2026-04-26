@@ -1,0 +1,10 @@
+{
+  "source": "GloFAS",
+  "source_url": "https://floodobservatory.colorado.edu/temp/MasterListrev.xlsx",
+  "file_path": "E:\\Group Project\\data\\raw\\glofas\\global_flood_records.xlsx",
+  "checksum": "9ebcb24b96e06f826a2a18f37e51788f7e8410575258e58f0c4c6310cece7924",
+  "bytes_downloaded": 428865,
+  "downloaded_at": "2026-04-26T11:30:22.432178+00:00",
+  "used_fallback": true,
+  "fallback_reason": "404 Client Error: Not Found for url: https://floodobservatory.colorado.edu/temp/MasterListrev.xlsx"
+}
