@@ -1,6 +1,6 @@
 -- Optional dbt staging model for the Dartmouth Flood Observatory raw payloads.
--- The Python pipeline (scripts/transform.py) is the canonical loader; this
--- model is provided so analysts can also consume raw data through dbt.
+-- The Python pipeline (transformations/transform.py) is the canonical loader;
+-- this model is provided so analysts can also consume raw data through dbt.
 {{ config(materialized='view', schema='staging') }}
 
 WITH src AS (

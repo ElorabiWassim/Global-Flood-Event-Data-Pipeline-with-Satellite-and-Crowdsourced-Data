@@ -11,6 +11,9 @@ openpyxl==3.1.5
 # deliberately do NOT depend on geopandas / shapely / fiona inside the
 # pipeline image. Add them locally if you want to do ad-hoc analysis.
 h3==3.7.7
+# pyshp reads the .dbf attribute table from the Dartmouth FO HDX shapefile
+# (the only public format HDX still publishes). Pure Python, no native deps.
+pyshp==2.3.1
 
 # --- Database ---
 SQLAlchemy==2.0.30

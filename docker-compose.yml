@@ -2,7 +2,12 @@ version: "3.9"
 
 services:
   airflow:
-    image: apache/airflow:2.9.3-python3.11
+    # Custom image bakes pandas / SQLAlchemy / h3 / dbt-core into the image
+    # so container startup is fast and reproducible. See airflow/Dockerfile.
+    build:
+      context: .
+      dockerfile: airflow/Dockerfile
+    image: flood-pipeline-airflow:2.9.3
     container_name: flood_airflow
     env_file:
       - .env
@@ -11,20 +16,22 @@ services:
       AIRFLOW__CORE__LOAD_EXAMPLES: "false"
       # Tell the DAG where the project root is mounted inside the container.
       FLOOD_PIPELINE_ROOT: /opt/airflow
-      # Standard Airflow knob: install our deps on container startup.
-      _PIP_ADDITIONAL_REQUIREMENTS: >-
-        pandas==2.2.2 numpy==1.26.4 python-dotenv==1.0.1 requests==2.32.3
-        openpyxl==3.1.5 h3==3.7.7 SQLAlchemy==2.0.30 psycopg2-binary==2.9.9
     volumes:
-      - ./airflow/dags:/opt/airflow/dags
+      # Airflow runtime state (logs + plugins). DAGs live at root ./dags.
+      - ./dags:/opt/airflow/dags
       - ./airflow/logs:/opt/airflow/logs
       - ./airflow/plugins:/opt/airflow/plugins
-      # Mount the project source so the DAG can import scripts.* directly.
-      - ./scripts:/opt/airflow/scripts
+      # Mount each source package so the DAG can import them as top-level
+      # modules (resolved via FLOOD_PIPELINE_ROOT=/opt/airflow on sys.path).
+      - ./config:/opt/airflow/config:ro
+      - ./db:/opt/airflow/db:ro
+      - ./ingestion:/opt/airflow/ingestion:ro
+      - ./transformations:/opt/airflow/transformations:ro
+      - ./validation:/opt/airflow/validation:ro
+      # dbt project: read-only models + writable target/ + run logs.
+      - ./dbt:/opt/airflow/dbt
       - ./data:/opt/airflow/data
-      - ./schema.sql:/opt/airflow/schema.sql:ro
       - ./.env:/opt/airflow/.env:ro
-      - ./requirements:/opt/airflow/requirements:ro
     ports:
       - "8081:8080"
     command: >
@@ -52,10 +59,11 @@ services:
       API_PORT: 8000
     volumes:
       # Live-reload friendly: bind-mount sources during development. Comment
-      # out for a fully-baked production image.
-      - ./scripts:/app/scripts:ro
+      # out for a fully-baked production image. The API only needs ``config``
+      # and ``db`` to query marts — no ingestion / transformation code.
+      - ./config:/app/config:ro
+      - ./db:/app/db:ro
       - ./api:/app/api:ro
-      - ./schema.sql:/app/schema.sql:ro
     ports:
       - "8000:8000"
     depends_on:

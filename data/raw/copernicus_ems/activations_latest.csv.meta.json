@@ -4,7 +4,7 @@
   "file_path": "E:\\Group Project\\data\\raw\\copernicus_ems\\activations_latest.csv",
   "checksum": "14a6db418f8f9c399a6d0b0dd9506adb23979f4651992893d6dbfc69bbf1e666",
   "bytes_downloaded": 24036,
-  "downloaded_at": "2026-04-26T11:43:49.872627+00:00",
+  "downloaded_at": "2026-04-28T13:41:50.117319+00:00",
   "used_fallback": true,
   "fallback_reason": "404 Client Error: Not Found for url: https://emergency.copernicus.eu/mapping/list-of-activations-rapid/?download=csv"
 }

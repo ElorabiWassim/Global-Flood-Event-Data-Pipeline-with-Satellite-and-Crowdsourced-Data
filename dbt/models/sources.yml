@@ -13,7 +13,7 @@ sources:
       - name: ingestion_log
 
   - name: staging
-    description: "Canonical unified flood events. Built by scripts.transform."
+    description: "Canonical unified flood events. Built by transformations.transform."
     schema: staging
     tables:
       - name: flood_events

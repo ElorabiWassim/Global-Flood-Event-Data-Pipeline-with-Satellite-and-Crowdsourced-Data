@@ -12,6 +12,7 @@ SELECT
     date_start,
     date_end,
     country,
+    river_basin,
     latitude,
     longitude,
     ST_AsGeoJSON(geometry)::json AS geometry_geojson,

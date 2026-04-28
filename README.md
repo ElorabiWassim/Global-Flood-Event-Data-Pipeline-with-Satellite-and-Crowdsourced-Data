@@ -23,12 +23,12 @@ analysis-ready PostGIS / H3 database, exposed through a FastAPI service.
                               \      \/
                           INSERT into raw.<source>_events  (JSONB payload)
                                   |
-                       scripts/transform.py
+                  transformations/transform.py
                                   |
                                   v
                      staging.flood_events  (canonical, H3 + PostGIS)
                                   |
-                       scripts/marts.py
+                  transformations/marts.py
                                   |
                                   v
                     marts.* views    --->  FastAPI (api/main.py)
@@ -39,41 +39,55 @@ analysis-ready PostGIS / H3 database, exposed through a FastAPI service.
 | Schema    | Purpose                                                        |
 |-----------|----------------------------------------------------------------|
 | `raw`     | Untouched ingestion. One JSONB row per source row + audit log. |
-| `staging` | Canonical unified `flood_events` table (defined in `schema.sql`). |
+| `staging` | Canonical unified `flood_events` table (defined in `db/schema.sql`). |
 | `marts`   | API-ready views built on top of `staging`.                     |
 
-The full DDL lives in [`schema.sql`](./schema.sql) and is applied
+The full DDL lives in [`db/schema.sql`](./db/schema.sql) and is applied
 idempotently by the pipeline's first task.
 
 ## 2. Repository layout
 
 ```
 .
-├── airflow/dags/flood_event_pipeline_dag.py   # Airflow DAG
 ├── api/                                       # FastAPI service
 │   ├── main.py
 │   └── Dockerfile
+├── airflow/                                   # Airflow runtime state only
+│   ├── logs/                                  #   (logs + plugins; DAGs live
+│   └── plugins/                               #    at root ./dags)
+├── config/                                    # env-driven settings
+│   ├── __init__.py
+│   └── settings.py
+├── dags/                                      # Airflow DAGs
+│   └── flood_event_pipeline_dag.py
 ├── data/
 │   ├── raw/<source>/                          # downloaded files + .meta.json
 │   ├── processed/
 │   └── logs/data_quality_report.md
+├── db/                                        # database layer
+│   ├── __init__.py
+│   ├── client.py                              # SQLAlchemy engine + helpers
+│   └── schema.sql                             # canonical DDL
 ├── dbt/                                       # optional dbt project
 ├── docs/data_sources.md
+├── ingestion/                                 # raw-load layer
+│   ├── __init__.py
+│   ├── common.py
+│   ├── ingest_dartmouth.py
+│   ├── ingest_glofas.py
+│   ├── ingest_copernicus_ems.py
+│   ├── ingest_emdat.py
+│   └── ingest_reliefweb.py
 ├── requirements/base.txt
-├── schema.sql                                 # source of truth
-├── scripts/
-│   ├── config.py                              # env-driven settings
-│   ├── db.py                                  # SQLAlchemy engine + helpers
-│   ├── transform.py                           # raw  -> staging
-│   ├── marts.py                               # staging -> marts
-│   ├── data_quality.py                        # DQ checks + Markdown report
-│   └── ingestion/
-│       ├── common.py
-│       ├── ingest_dartmouth.py
-│       ├── ingest_glofas.py
-│       ├── ingest_copernicus_ems.py
-│       ├── ingest_emdat.py
-│       └── ingest_reliefweb.py
+├── scripts/                                   # one-off utility scripts
+│   └── _make_status_pdf.py
+├── transformations/                           # raw -> staging -> marts
+│   ├── __init__.py
+│   ├── transform.py
+│   └── marts.py
+├── validation/                                # data-quality layer
+│   ├── __init__.py
+│   └── data_quality.py
 ├── docker-compose.yml
 └── .env                                       # NOT committed in production
 ```
@@ -130,21 +144,21 @@ python -m venv .venv && source .venv/bin/activate         # or .venv\Scripts\act
 pip install -r requirements/base.txt
 
 # 1) Create schemas + tables
-python -c "from scripts.db import apply_schema_sql; apply_schema_sql()"
+python -c "from db.client import apply_schema_sql; apply_schema_sql()"
 
 # 2) Run a single source (or all)
-python -m scripts.ingestion.ingest_dartmouth
-python -m scripts.ingestion.ingest_reliefweb
+python -m ingestion.ingest_dartmouth
+python -m ingestion.ingest_reliefweb
 # ...
 
 # 3) Transform raw -> staging
-python -m scripts.transform
+python -m transformations.transform
 
 # 4) Build marts
-python -m scripts.marts
+python -m transformations.marts
 
 # 5) Run DQ checks (writes data/logs/data_quality_report.md)
-python -m scripts.data_quality
+python -m validation.data_quality
 
 # 6) Serve the API
 uvicorn api.main:app --reload --host 0.0.0.0 --port 8000
@@ -205,7 +219,7 @@ fallback behaviour.
   activations. We use the bundled CSV (`activations.csv`) plus an
   optional `COPERNICUS_EMS_FEED_URL` override.
 - **Basin-level analysis** is currently approximated by country because
-  the unified schema in `schema.sql` does not include a dedicated basin
+  the unified schema in `db/schema.sql` does not include a dedicated basin
   column. EM-DAT's `River Basin` field is preserved in the raw payload
   and can be promoted later (a one-line schema change + dbt model).
 - **Polygon geometries**: only point geometries are persisted today.
@@ -216,7 +230,7 @@ fallback behaviour.
 
 1. Promote EM-DAT `River Basin` to a real column on `staging.flood_events`
    so `marts.flood_frequency_by_basin` becomes hydrologically accurate.
-2. Add a real CDS-API GloFAS branch (`scripts/ingestion/ingest_glofas.py`
+2. Add a real CDS-API GloFAS branch (`ingestion/ingest_glofas.py`
    has the placeholder).
 3. Wire dbt into the DAG (`dbt run --profiles-dir dbt`) once `dbt-core`
    is added to the airflow image.

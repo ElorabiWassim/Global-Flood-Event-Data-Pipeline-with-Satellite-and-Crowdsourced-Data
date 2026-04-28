@@ -25,7 +25,7 @@ _ROOT = Path(__file__).resolve().parent.parent
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
-from scripts.db import get_engine  # noqa: E402
+from db.client import get_engine  # noqa: E402
 
 app = FastAPI(
     title="Global Flood Event API",

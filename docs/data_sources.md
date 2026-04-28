@@ -6,13 +6,13 @@ no public download URL exists, the pipeline ships a **seed CSV** so the
 DAG can run end-to-end out of the box, and a clearly-marked extension
 point is left for operators to plug in real credentials.
 
-| Source              | Format            | Public access? | Implementation       |
-|---------------------|-------------------|----------------|----------------------|
-| Dartmouth FO        | XLSX / CSV        | Yes            | `ingest_dartmouth.py`|
-| GloFAS / GFD        | CSV (CDS for live)| Partial        | `ingest_glofas.py`   |
-| Copernicus EMS      | HTML / CSV        | Partial        | `ingest_copernicus_ems.py` |
-| EM-DAT              | CSV / XLSX        | No (login)     | `ingest_emdat.py`    |
-| ReliefWeb           | JSON REST API     | Yes            | `ingest_reliefweb.py`|
+| Source              | Format            | Public access? | Implementation                              |
+|---------------------|-------------------|----------------|---------------------------------------------|
+| Dartmouth FO        | XLSX / CSV        | Yes            | `ingestion/ingest_dartmouth.py`             |
+| GloFAS / GFD        | CSV (CDS for live)| Partial        | `ingestion/ingest_glofas.py`                |
+| Copernicus EMS      | HTML / CSV        | Partial        | `ingestion/ingest_copernicus_ems.py`        |
+| EM-DAT              | CSV / XLSX        | No (login)     | `ingestion/ingest_emdat.py`                 |
+| ReliefWeb           | JSON REST API     | Yes            | `ingestion/ingest_reliefweb.py`             |
 
 ---
 
@@ -33,7 +33,7 @@ There are TWO related products under this label:
 1. **GloFAS** (Copernicus CEMS) — gridded reanalysis + forecast. Requires
    a free CDS API account: <https://cds.climate.copernicus.eu>.
    - Set `CDS_API_URL` and `CDS_API_KEY` in `.env`.
-   - The placeholder branch in `scripts/ingestion/ingest_glofas.py`
+   - The placeholder branch in `ingestion/ingest_glofas.py`
      documents where to add the `cdsapi` client call.
 
 2. **GFD / Global Active Archive of Large Floods** (Brakenridge / DFO) —
@@ -68,11 +68,11 @@ There are TWO related products under this label:
 
 ## 5. ReliefWeb
 
-- Public REST API: <https://api.reliefweb.int/v1/disasters>
+- Public REST API: <https://api.reliefweb.int/v2/disasters>
 - License: open. Only requires a polite `appname` query parameter.
 - Implementation:
   - Calls
-    `GET /v1/disasters?appname=<RELIEFWEB_APPNAME>&filter[field]=type&filter[value]=Flood&limit=500`.
+    `GET /v2/disasters?appname=<RELIEFWEB_APPNAME>&filter[field]=type&filter[value]=Flood&limit=500`.
   - Persists the JSON response under `data/raw/reliefweb/reliefweb_<batch>.json`.
   - Falls back to the seed CSV `data/raw/reliefweb/reliefweb_floods.csv`
     if the API is unreachable.
