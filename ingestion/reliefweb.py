@@ -14,10 +14,10 @@ from config.settings import settings
 from transforms.reliefweb import transform_reliefweb_record
 from validation.models.reliefweb import ReliefWebEvent
 
-# ── DB engine (uses Supabase URL from settings, exactly like Rabah) ────────
+
 engine = create_engine(settings.resolved_database_url, pool_pre_ping=True)
 
-# ── State file (tracks last run for incremental mode) ──────────────────────
+
 STATE_FILE = Path("data/.reliefweb_last_run.txt")
 
 INSERT_SQL = text("""
@@ -113,8 +113,6 @@ def fetch_raw(since: datetime | None) -> list[dict]:
             di = f.get("date", {})
             raw_date = di.get("event") or di.get("created")
 
-            # ✅ FIX: use tz_convert(None) not tz_localize(None)
-            # pd.to_datetime(..., utc=True) returns tz-aware → must use tz_convert
             try:
                 parsed_date = pd.to_datetime(raw_date, utc=True).tz_convert(None)
             except Exception:
@@ -139,7 +137,6 @@ def fetch_raw(since: datetime | None) -> list[dict]:
     return records
 
 
-# ── Main (called by Airflow DAG, same pattern as Rabah's main()) ───────────
 
 def main(mode: str = "incremental"):
     run_time = datetime.now(timezone.utc).replace(tzinfo=None)
@@ -167,7 +164,6 @@ def main(mode: str = "incremental"):
                     skipped += 1
                     continue
 
-                # Transform → validate (same 3-layer pattern as Rabah)
                 payload   = transform_reliefweb_record(record, settings.h3_resolution)
                 validated = ReliefWebEvent(**payload)
 
