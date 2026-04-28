@@ -58,13 +58,25 @@ There are TWO related products under this label:
 ## 4. EM-DAT (CRED, UCLouvain)
 
 - Site: <https://www.emdat.be/>
-- Public portal: <https://public.emdat.be/>
-- License: free for non-commercial research with registration.
-- Direct download requires a login session; there is no public bulk URL.
-- Implementation:
-  - If `EMDAT_DOWNLOAD_URL` is set, the pipeline streams that URL.
-  - Otherwise it loads `data/raw/emdat/emdat_floods.csv` (the bundled
-    seed) and filters to `Disaster Type = Flood`.
+- Public portal: <https://public.emdat.be/> (gated, requires registration for
+  per-event access).
+- License: free for non-commercial research.
+- Implementation (priority order):
+  1. If `EMDAT_DOWNLOAD_URL` is set, the pipeline streams that URL (operator
+     can supply a signed per-event export or institutional mirror).
+  2. Otherwise the public CRED-published HDX dataset
+     [`emdat-country-profiles`](https://data.humdata.org/dataset/emdat-country-profiles)
+     is downloaded as XLSX and treated as the canonical source.
+  3. As a last resort, `data/raw/emdat/emdat_floods.csv` (bundled seed CSV).
+- **Granularity caveat (HDX path):** the HDX XLSX is `(Year × Country ×
+  Disaster Subtype)` *aggregated yearly stats*, not per-event records. The
+  ingestor expands each aggregate row into a synthetic event with:
+  - `DisNo. = "EMDAT-HDX-{Year}-{ISO}-{slug(Subtype)}"`
+  - `Start = Jan 1 / End = Dec 31` of that year (year-only date precision)
+  - No `Latitude` / `Longitude` / `River Basin` / `Magnitude`
+  - `Total Deaths`, `Total Affected`, `Total Damage (USD)` come straight
+    from the EM-DAT totals.
+- All paths filter to rows where `Disaster Type` contains "Flood".
 
 ## 5. ReliefWeb
 

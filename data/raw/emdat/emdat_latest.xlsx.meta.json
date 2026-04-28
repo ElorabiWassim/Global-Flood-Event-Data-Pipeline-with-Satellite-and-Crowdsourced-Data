@@ -1,0 +1,10 @@
+{
+  "source": "EM-DAT",
+  "source_url": "https://data.humdata.org/dataset/74163686-a029-4e27-8fbf-c5bfcd13f953/resource/c5ce40d6-07b1-4f36-955a-d6196436ff6b/download/emdat-country-profiles_2026_04_24.xlsx",
+  "file_path": "E:\\Group Project\\data\\raw\\emdat\\emdat_latest.xlsx",
+  "checksum": "bfce906eaf21890343fd8b1e7a32f750f17daffbb68722b33c13b085da368ea5",
+  "bytes_downloaded": 404292,
+  "downloaded_at": "2026-04-28T16:30:19.986230+00:00",
+  "used_fallback": false,
+  "fallback_reason": null
+}
