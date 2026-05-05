@@ -1,5 +1,43 @@
 # Project status summary
-*Global Flood Event Data Pipeline — generated 2026-04-27*
+*Global Flood Event Data Pipeline — generated 2026-04-27, updated 2026-05-06*
+
+## Updates since 2026-04-27
+
+### Test suite
+- **64 pytest cases** now pass (`tests/test_db_client.py`, `tests/test_ingestion_common.py`, `tests/test_transform.py`). Covers every `_normalize_*` function, scalar coercers, basin extraction, JSON cleaning, ingestion helpers, and source-name contracts.
+
+### Schema: `river_basin` promoted to a real column
+- `staging.flood_events.river_basin` is populated (mainly by EM-DAT, ~9.5k rows). `marts.flood_frequency_by_basin` now uses the real column with country fallback and a `basin_source` flag.
+
+### Interactive dashboard
+- New SPA at `api/static/index.html` (Tailwind + Chart.js + Lucide). Served at `/`; the original JSON listing moved to `/api`. Charts: monthly time series, source breakdown, top countries, severity distribution. Filterable events table + endpoint explorer.
+
+### CORS + new analytics endpoint
+- `CORSMiddleware` enabled in `api/main.py`. New `GET /analytics/by-source` returns a single-call per-source rollup (used by the dashboard for correct totals).
+
+### **Source rename + dedupe**  *(this is the big one)*
+- Investigation in `validation/investigate_displaced.py` found that the source previously labelled **`GloFAS`** is **not** Copernicus GloFAS — it pulls `floodobservatory.colorado.edu/temp/MasterListrev.xlsx`, the **live vintage of the Dartmouth Flood Observatory archive** that `Dartmouth_FO` reads (frozen) from HDX. About **73% of those rows duplicated** `Dartmouth_FO` Register#s, plus an intra-Dartmouth_FO `2507`-vs-`DFO_2507` collision from a previous fallback run.
+- Renamed source `GloFAS` → **`Dartmouth_MasterList`** in `ingestion/ingest_glofas.py`, `transformations/transform.py`, the test suite, and the dashboard color map. Raw table name `raw.glofas_events` kept for backwards compatibility.
+- Added **`marts.flood_events_unique`** view that picks one canonical row per DFO Register# (prefers `Dartmouth_MasterList` over `Dartmouth_FO`; prefers bare Register# over `DFO_`-prefixed). Non-DFO sources are passed through untouched.
+- Rebuilt every rollup mart (`flood_events_by_region`, `flood_events_by_h3`, `flood_events_by_month`, `flood_frequency_by_basin`) on top of `flood_events_unique`. The raw `marts.flood_events` projection is preserved for auditing.
+- API endpoints serving event-level data now read from `marts.flood_events_unique`.
+- One-time migration (`scripts/migrate_glofas_rename.py`, idempotent) renamed the existing rows in `staging.flood_events` and refreshed the marts.
+
+### Dashboard KPI accuracy
+- Two bugs in the dashboard's KPI math fixed: `Total events` was capped at 1000/source (off by ~16k) and `Total deaths` only summed the top-10 countries. Replaced both with the new `/analytics/by-source` rollup.
+
+### Headline numbers, before vs after dedupe
+
+| KPI | Raw (`marts.flood_events`) | Deduped (`marts.flood_events_unique`) | Removed |
+|---|---:|---:|---:|
+| Events | 21,018 | **16,405** | 4,613 |
+| Deaths | 8,657,483 | **7,866,637** | 790,846 |
+| Displaced | 1,616,913,200 | **762,424,144** | 854,489,056 |
+| Distinct sources | 5 | 5 | — |
+
+The dashboard KPIs now match `marts.flood_events_unique` exactly.
+
+---
 
 ## Working (validated end-to-end against Supabase)
 
@@ -10,19 +48,19 @@
 - `config/settings.py` — Loads `.env`, builds `DATABASE_URL`, exposes `H3_RESOLUTION` and other tunables.
 - `db/client.py` — Singleton SQLAlchemy engine tuned for the Supabase pooler (TCP keepalives, `pool_pre_ping`, `pool_recycle=300`), `apply_schema_sql()`, `insert_raw_records()`, `truncate_raw_table()`, `log_ingestion()`, `execute_with_retry()` with exponential backoff on `OperationalError`, and `_clean_for_json()` for NaN-safe payloads.
 
-### 3. Ingestion (5 sources, 14,708 rows total)
+### 3. Ingestion (5 sources, ~21k rows raw / ~16k deduped)
 - `ingestion/common.py` — `download_to()` with SHA-256 + sidecar `.meta.json`, plus `parse_with_fallback()` for parser-time recovery.
-- `ingestion/ingest_dartmouth.py` — **913 rows** (Dartmouth Flood Observatory).
-- `ingestion/ingest_glofas.py` — **5,503 rows** (Global Active Archive of Large Floods CSV).
-- `ingestion/ingest_copernicus_ems.py` — **335 rows** (filtered to floods only).
-- `ingestion/ingest_emdat.py` — **6,178 rows** from bundled seed.
-- `ingestion/ingest_reliefweb.py` — **1,779 rows** via the public REST API.
+- `ingestion/ingest_dartmouth.py` — **4,616 rows** (`Dartmouth_FO`, HDX-frozen 2019 vintage of DFO).
+- `ingestion/ingest_glofas.py` — **5,503 rows** (`Dartmouth_MasterList`, live DFO MasterList; **not** Copernicus GloFAS — see Updates section).
+- `ingestion/ingest_copernicus_ems.py` — **345 rows** (Rapid Mapping API, filtered to floods).
+- `ingestion/ingest_emdat.py` — **8,775 rows** (CRED HDX XLSX, synthetic per-event expansion).
+- `ingestion/ingest_reliefweb.py` — **1,779 rows** (REST API v2 with approved appname).
 
 ### 4. Unified canonical model
-- `transformations/transform.py` — Per-source `_normalize_*` functions, H3 v3 indexing, PostGIS `ST_MakePoint`, upsert on `(source, source_event_id)`. All 14,708 rows land in `staging.flood_events`.
+- `transformations/transform.py` — Per-source `_normalize_*` functions, H3 v3 indexing, PostGIS `ST_MakePoint`, upsert on `(source, source_event_id)`. All ~21,018 rows land in `staging.flood_events`; the deduped analytical view collapses DFO Register# overlap down to ~16,405.
 
 ### 5. Marts (6 views)
-- `transformations/marts.py` — `marts.flood_events`, `flood_events_by_region`, `flood_events_by_h3`, `flood_frequency_by_basin`, `flood_events_by_month`.
+- `transformations/marts.py` — `marts.flood_events` (raw projection, audit), `marts.flood_events_unique` (canonical, deduped), `flood_events_by_region`, `flood_events_by_h3`, `flood_frequency_by_basin`, `flood_events_by_month` (rollups built on `_unique`).
 
 ### 6. Data quality
 - `validation/data_quality.py` — 7 row-level checks plus a per-source rollup.
@@ -32,7 +70,8 @@
 - `dags/flood_event_pipeline_dag.py` — Apply schema → 5 ingestions in parallel → transform → marts → DQ.
 
 ### 8. REST API
-- `api/main.py` — FastAPI: `/health`, `/flood-events`, `/flood-events/by-region`, `/by-time`, `/by-severity`, `/by-h3`, `/analytics/frequency-by-basin`. Returns valid JSON (verified live).
+- `api/main.py` — FastAPI: `/`, `/api`, `/health`, `/flood-events`, `/flood-events/by-region`, `/by-time`, `/by-severity`, `/by-h3`, `/analytics/frequency-by-basin`, `/analytics/by-month`, `/analytics/by-source`. Event-level endpoints read from `marts.flood_events_unique`. CORS enabled.
+- `api/static/index.html` — Interactive SPA dashboard (Tailwind + Chart.js + Lucide).
 - `api/Dockerfile` — Standalone container image.
 
 ### 9. Container orchestration
@@ -69,22 +108,23 @@
 ## What's still missing / known limitations
 
 ### Data sources
-- **GloFAS reanalysis grids** — currently uses the public Active Archive CSV only. The Copernicus CDS API branch is a placeholder. Set `CDS_API_URL` and `CDS_API_KEY` and add a `cdsapi` call in `ingestion/ingest_glofas.py`.
-- **EM-DAT** — requires a free login; bulk download is gated. The pipeline only reads the seed CSV unless you set `EMDAT_DOWNLOAD_URL` to a session-signed URL.
-- **Copernicus EMS** — no stable public JSON feed. Falls back to the bundled CSV unless `COPERNICUS_EMS_FEED_URL` is provided.
+- **Copernicus GloFAS reanalysis grids are not ingested.** What `ingest_glofas.py` actually pulls is the live DFO MasterList; see the Updates section. A real GloFAS reanalysis branch (NetCDF streamflow grids via `cdsapi`) would feed a separate `raw.glofas_reanalysis` table and a separate normalizer.
+- **EM-DAT** — free login required for bulk download; pipeline now uses the CRED HDX global XLSX with synthetic per-event expansion. `EMDAT_DOWNLOAD_URL` overrides.
+- **Copernicus EMS** — official paged JSON activations API (no scraping).
 
 ### Schema gaps
-- **River basin** — `staging.flood_events` has no `basin` column. `marts.flood_frequency_by_basin` currently approximates basin by country. EM-DAT preserves "River Basin" in the raw JSONB, so promoting it is a one-line schema change plus a view update.
+- **River basin** — *resolved.* `staging.flood_events.river_basin` is now a real column populated mainly by EM-DAT, with country fallback in `marts.flood_frequency_by_basin`.
 - **Polygon geometries** — only point geometries are stored. Polygon shapefiles from Copernicus EMS or DFO would need a `geometry_polygon GEOMETRY(MultiPolygon, 4326)` column and updated centroid-for-H3 logic.
 
 ### Coverage gaps
-- **Per-source coordinate availability is uneven**: Dartmouth has 100% lat / lon, EM-DAT has ~16%, GloFAS / Copernicus EMS / ReliefWeb seeds have 0%. This is a data-source reality, not a bug.
-- **Severity** is only populated for Dartmouth and GloFAS (1–2 scale). EM-DAT and ReliefWeb don't expose one.
+- **Per-source coordinate availability is uneven**: `Dartmouth_FO` has 100% lat/lon (HDX SHP centroids), EM-DAT has ~16%, `Dartmouth_MasterList` / Copernicus EMS / ReliefWeb have 0%. This is a data-source reality, not a bug.
+- **Severity** is only populated for the two DFO sources (1–2 scale). EM-DAT and ReliefWeb don't expose one.
+- **DFO `Displaced` semantics** — broader than "permanently displaced" (includes precautionary evacuees and exposed populations). Compare per-event values against EM-DAT for a stricter definition.
 
 ### Pipeline / infrastructure
-- **dbt isn't wired into the Airflow DAG** — `dbt-core` would need to be added to `_PIP_ADDITIONAL_REQUIREMENTS` and a `BashOperator` task added for `dbt run`. Models exist standalone in `dbt/`.
+- **dbt isn't wired into the Airflow DAG** — `dbt-core` is now installed in the Airflow image, but no `BashOperator` task runs `dbt run` yet. Models exist standalone in `dbt/`.
 - **`SequentialExecutor`** is fine for now but only runs one task at a time. Switching to `LocalExecutor` requires a real metadata DB (Postgres container) instead of the bundled SQLite.
-- **No automated test suite** — no `pytest` tests yet. Tests for `_normalize_*` functions, `_clean_for_json`, `parse_with_fallback`, plus one integration test against a Postgres test container would be ideal.
+- **Test suite is in place** — *resolved.* 64 pytest cases cover transformers, cleaners, parsers, and source contracts. An integration test against a Postgres test container would still be a useful addition.
 - **No Great Expectations / Soda** alongside `data_quality.py` — current checks are inline SQL only, not a versioned suite.
 
 ### Repository hygiene
@@ -96,13 +136,13 @@
 
 ### Security
 - **Default Airflow credentials** are `admin / admin` (intentional for local). Change before any non-local deployment.
-- **No CORS restrictions** in `api/main.py` — currently `allow_origins=["*"]`. Lock down before exposing.
+- **CORS is permissive** in `api/main.py` — `allow_origins=["*"]` (intentional for the bundled dashboard). Lock down before exposing publicly.
 
 ---
 
 ## Recommended priority for next session
 
-1. **Promote `river_basin` to a real column** in `staging.flood_events` so the basin mart becomes hydrologically accurate (1 schema change + 1 transform line + 1 view).
-2. **Add a small `tests/` folder** with pytest cases for each `_normalize_*` function and `_clean_for_json` — gives regression safety as data shapes drift.
-3. **Wire dbt into the DAG** as a final task — turns the dbt models from documentation into actual run artifacts.
-4. **Build a custom Airflow image** so dependencies don't reinstall on every container start.
+1. **Add a real Copernicus GloFAS reanalysis branch** into a separate `raw.glofas_reanalysis` table + `_normalize_glofas_reanalysis` function (the placeholder is already in `ingest_glofas.py`).
+2. **Wire dbt into the DAG** as a final task — dbt is now installed in the airflow image; just needs a `BashOperator`.
+3. **Build a custom Airflow image** so dependencies don't reinstall on every container start.
+4. **Add Great Expectations / Soda** alongside `data_quality.py` for a versioned, declarative DQ suite.

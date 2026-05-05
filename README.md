@@ -13,12 +13,14 @@ analysis-ready PostGIS / H3 database, exposed through a FastAPI service.
                            |  flood_event_pipeline    |
                            +--------------------------+
                                     |
-        +---------+---------+-------+--------+----------+
-        |         |         |                |          |
-   Dartmouth   GloFAS   Copernicus EMS    EM-DAT   ReliefWeb API
-        |         |         |                |          |
-        v         v         v                v          v
-   data/raw/<source>/  (CSV / XLSX / JSON snapshots + .meta.json sidecars)
+        +---------+--------------+-------+----------+--------------+
+        |         |              |          |                     |
+   Dartmouth_FO  Dartmouth_      Copernicus EMS   EM-DAT      ReliefWeb API
+   (HDX, frozen) MasterList     (Rapid Mapping)   (CRED HDX)
+                 (live, DFO)
+        |         |              |          |                     |
+        v         v              v          v                     v
+   data/raw/<source>/  (CSV / XLSX / JSON / SHP snapshots + .meta.json sidecars)
         \____________________  \_____  ____________________/
                               \      \/
                           INSERT into raw.<source>_events  (JSONB payload)
@@ -31,7 +33,12 @@ analysis-ready PostGIS / H3 database, exposed through a FastAPI service.
                   transformations/marts.py
                                   |
                                   v
-                    marts.* views    --->  FastAPI (api/main.py)
+              marts.flood_events           (raw projection, audit)
+              marts.flood_events_unique    (deduped, canonical for analytics)
+              marts.flood_events_by_*      (rollups built on _unique)
+                                  |
+                                  v
+                          FastAPI (api/main.py)
 ```
 
 ### Schemas
@@ -73,8 +80,11 @@ idempotently by the pipeline's first task.
 ├── ingestion/                                 # raw-load layer
 │   ├── __init__.py
 │   ├── common.py
-│   ├── ingest_dartmouth.py
-│   ├── ingest_glofas.py
+│   ├── ingest_dartmouth.py            # DFO HDX shapefile (frozen 2019)
+│   ├── ingest_glofas.py               # legacy filename; pulls DFO live
+│   │                                  #   MasterList (Dartmouth_MasterList).
+│   │                                  #   Real GloFAS reanalysis would
+│   │                                  #   feed a separate raw table.
 │   ├── ingest_copernicus_ems.py
 │   ├── ingest_emdat.py
 │   └── ingest_reliefweb.py
@@ -104,7 +114,7 @@ All credentials and tunables come from `.env`:
 | `API_HOST`/`API_PORT`| FastAPI bind config.                                 |
 | `RELIEFWEB_APPNAME`  | App identifier sent to the public ReliefWeb API.     |
 | `EMDAT_DOWNLOAD_URL` | Optional signed URL for EM-DAT bulk export.          |
-| `CDS_API_URL`/`CDS_API_KEY` | Optional Copernicus CDS credentials (GloFAS).|
+| `CDS_API_URL`/`CDS_API_KEY` | Optional Copernicus CDS credentials. Real GloFAS reanalysis is **not yet wired** — these are kept as a placeholder for a future ingester. |
 
 ## 4. Running with Docker
 
@@ -209,31 +219,36 @@ fallback behaviour.
 
 ## 9. Known limitations
 
-- **GloFAS reanalysis grids** require the Copernicus CDS API key. Without
-  one, the pipeline falls back to the Global Active Archive of Large Floods
-  CSV (no per-event lat/lon, hence no H3).
+- **GloFAS reanalysis grids** are **not** ingested today. The file named
+  `ingestion/ingest_glofas.py` actually pulls the Dartmouth Flood
+  Observatory live MasterList — a different vintage of the same archive
+  that `ingest_dartmouth.py` reads from HDX. Both are surfaced as the
+  `Dartmouth_FO` and `Dartmouth_MasterList` sources respectively, and the
+  `marts.flood_events_unique` view dedupes their large Register#-overlap.
+  A real Copernicus GloFAS branch can be wired via the CDS API.
 - **EM-DAT** requires a free user account; bulk download is gated behind
   a session cookie. The pipeline ships with a CSV seed and accepts a
   signed URL via `EMDAT_DOWNLOAD_URL`.
 - **Copernicus EMS** does not publish a stable public JSON feed of
   activations. We use the bundled CSV (`activations.csv`) plus an
   optional `COPERNICUS_EMS_FEED_URL` override.
-- **Basin-level analysis** is currently approximated by country because
-  the unified schema in `db/schema.sql` does not include a dedicated basin
-  column. EM-DAT's `River Basin` field is preserved in the raw payload
-  and can be promoted later (a one-line schema change + dbt model).
 - **Polygon geometries**: only point geometries are persisted today.
   When polygon shapefiles are available, store the polygon and use its
   centroid for H3 indexing — this is documented inline in `transform.py`.
+- **DFO `Displaced` semantics**: DFO's `Displaced` column is broader
+  than "permanently displaced" (it includes precautionary evacuees and
+  exposed populations). Compare per-event values against EM-DAT for a
+  stricter definition.
 
 ## 10. Recommended next steps
 
-1. Promote EM-DAT `River Basin` to a real column on `staging.flood_events`
-   so `marts.flood_frequency_by_basin` becomes hydrologically accurate.
-2. Add a real CDS-API GloFAS branch (`ingestion/ingest_glofas.py`
-   has the placeholder).
-3. Wire dbt into the DAG (`dbt run --profiles-dir dbt`) once `dbt-core`
-   is added to the airflow image.
-4. Replace the `SequentialExecutor` with `LocalExecutor` + a Postgres
+1. Add a real CDS-API GloFAS branch into a separate raw table
+   (`raw.glofas_reanalysis`) and a separate `_normalize_glofas_reanalysis`
+   function. The placeholder is already in `ingest_glofas.py`.
+2. Replace the `SequentialExecutor` with `LocalExecutor` + a Postgres
    metadata DB once the workload exceeds one task at a time.
-5. Add Great Expectations / Soda checks alongside `data_quality.py`.
+3. Add Great Expectations / Soda checks alongside `data_quality.py`.
+4. Re-evaluate the dedupe strategy in `marts.flood_events_unique` if a
+   future source publishes events under non-DFO IDs that nonetheless
+   cover the same floods (currently we only dedupe across the DFO
+   Register# space).

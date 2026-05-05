@@ -18,6 +18,9 @@ from pathlib import Path
 from typing import Any, Optional
 
 from fastapi import FastAPI, HTTPException, Query
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse, JSONResponse
+from fastapi.staticfiles import StaticFiles
 from sqlalchemy import text
 
 # Make project-root imports work even when uvicorn launches from inside api/.
@@ -36,9 +39,33 @@ app = FastAPI(
     ),
 )
 
+# Permissive CORS — the bundled dashboard is same-origin, but enabling CORS
+# lets external front-ends and notebooks hit the API too. Lock allow_origins
+# down before any non-local deployment.
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=False,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# Static dashboard (index.html + assets). Mounted under /static so the
+# interactive single-page app can be served directly by FastAPI without
+# needing a separate web server.
+_STATIC_DIR = Path(__file__).resolve().parent / "static"
+if _STATIC_DIR.exists():
+    app.mount("/static", StaticFiles(directory=str(_STATIC_DIR)), name="static")
+
 # Mart objects that must exist before each route can serve real data.
+#
+# `events` points at the deduplicated view so analytical endpoints don't
+# double-count the DFO Register# overlap between Dartmouth_MasterList (live)
+# and Dartmouth_FO (HDX-frozen). The raw vintage-preserving projection
+# `marts.flood_events` is still queryable directly via SQL for auditing
+# but is intentionally not exposed through the API.
 _MART_VIEWS = {
-    "events":     "marts.flood_events",
+    "events":     "marts.flood_events_unique",
     "by_region":  "marts.flood_events_by_region",
     "by_h3":      "marts.flood_events_by_h3",
     "by_basin":   "marts.flood_frequency_by_basin",
@@ -90,11 +117,25 @@ def _ensure_or_503(qualified_name: str) -> None:
 # ---------------------------------------------------------------------------
 # Routes
 # ---------------------------------------------------------------------------
-@app.get("/", tags=["meta"])
-def root() -> dict[str, Any]:
+@app.get("/", include_in_schema=False)
+def dashboard():
+    """Serve the interactive dashboard SPA at the root URL.
+
+    Falls back to the JSON service-info payload if `api/static/index.html`
+    is missing (e.g. running from a checkout without the static assets).
+    """
+    index = _STATIC_DIR / "index.html"
+    if index.exists():
+        return FileResponse(index, media_type="text/html")
+    return JSONResponse(_service_info())
+
+
+def _service_info() -> dict[str, Any]:
     return {
         "service": "Global Flood Event API",
         "version": app.version,
+        "dashboard": "/",
+        "docs": "/docs",
         "endpoints": [
             "/health",
             "/flood-events",
@@ -103,8 +144,16 @@ def root() -> dict[str, Any]:
             "/flood-events/by-severity",
             "/flood-events/by-h3",
             "/analytics/frequency-by-basin",
+            "/analytics/by-month",
+            "/analytics/by-source",
         ],
     }
+
+
+@app.get("/api", tags=["meta"])
+def root() -> dict[str, Any]:
+    """Machine-readable service info (was previously served at `/`)."""
+    return _service_info()
 
 
 @app.get("/health", tags=["meta"])
@@ -234,6 +283,29 @@ def frequency_by_basin(
 def by_month() -> list[dict[str, Any]]:
     _ensure_or_503(_MART_VIEWS["by_month"])
     return _query(f"SELECT * FROM {_MART_VIEWS['by_month']} ORDER BY month")
+
+
+@app.get("/analytics/by-source", tags=["analytics"])
+def by_source() -> list[dict[str, Any]]:
+    """Per-source rollup of event counts and impact totals.
+
+    One row per source, served straight from `marts.flood_events`. Lets the
+    dashboard render correct totals (and the source-breakdown doughnut) in a
+    single round-trip instead of paginating per source.
+    """
+    _ensure_or_503(_MART_VIEWS["events"])
+    sql = f"""
+        SELECT source,
+               COUNT(*)::bigint                    AS event_count,
+               COALESCE(SUM(deaths),    0)::bigint AS total_deaths,
+               COALESCE(SUM(displaced), 0)::bigint AS total_displaced,
+               MIN(date_start)                     AS earliest_event,
+               MAX(date_start)                     AS latest_event
+        FROM {_MART_VIEWS["events"]}
+        GROUP BY source
+        ORDER BY event_count DESC
+    """
+    return _query(sql)
 
 
 if __name__ == "__main__":

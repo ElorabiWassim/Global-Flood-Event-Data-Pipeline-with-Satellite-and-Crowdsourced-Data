@@ -209,7 +209,13 @@ def _normalize_glofas(payloads: Iterable[dict]) -> list[dict]:
         )
         out.append(
             {
-                "source": "GloFAS",
+                # NOTE: this raw table is named ``glofas_events`` for legacy
+                # reasons but actually carries the Dartmouth Flood Observatory
+                # live ``MasterList`` (Brakenridge / DFO). The label below is
+                # the canonical source name used by the analytical layer; the
+                # ``marts.flood_events_unique`` view dedupes Register# overlap
+                # against the HDX-frozen ``Dartmouth_FO`` source.
+                "source": "Dartmouth_MasterList",
                 "source_event_id": _clean_text(event_id),
                 "event_name": None,
                 "main_cause": _clean_text(p.get("Main Cause")),

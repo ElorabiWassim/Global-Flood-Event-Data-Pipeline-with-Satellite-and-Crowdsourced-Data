@@ -1,0 +1,584 @@
+<!DOCTYPE html>
+<html lang="en" class="h-full">
+
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Global Flood Event Dashboard</title>
+  <meta name="description" content="Interactive dashboard for the Global Flood Event Data Pipeline." />
+
+  <!-- Tailwind (CDN) -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = {
+      theme: {
+        extend: {
+          colors: {
+            ocean: { 50: '#f0f9ff', 100: '#e0f2fe', 200: '#bae6fd', 300: '#7dd3fc', 400: '#38bdf8', 500: '#0ea5e9', 600: '#0284c7', 700: '#0369a1', 800: '#075985', 900: '#0c4a6e' },
+          },
+          fontFamily: { sans: ['Inter', 'ui-sans-serif', 'system-ui', 'sans-serif'] },
+          boxShadow: { soft: '0 1px 2px 0 rgb(0 0 0 / 0.04), 0 4px 16px -4px rgb(15 23 42 / 0.08)' }
+        }
+      }
+    }
+  </script>
+
+  <!-- Inter font -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+
+  <!-- Chart.js -->
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
+
+  <!-- Lucide icons -->
+  <script src="https://unpkg.com/lucide@latest"></script>
+
+  <style>
+    body {
+      font-family: 'Inter', system-ui, sans-serif;
+    }
+
+    .scrollbar-thin::-webkit-scrollbar {
+      height: 8px;
+      width: 8px;
+    }
+
+    .scrollbar-thin::-webkit-scrollbar-thumb {
+      background: #cbd5e1;
+      border-radius: 4px;
+    }
+
+    .scrollbar-thin::-webkit-scrollbar-track {
+      background: transparent;
+    }
+
+    .pill-dot {
+      display: inline-block;
+      width: .5rem;
+      height: .5rem;
+      border-radius: 9999px;
+      margin-right: .5rem;
+    }
+
+    .gradient-hero {
+      background: linear-gradient(135deg, #0c4a6e 0%, #0369a1 35%, #0891b2 100%);
+    }
+
+    .glass {
+      background: rgba(255, 255, 255, 0.65);
+      backdrop-filter: blur(8px);
+      -webkit-backdrop-filter: blur(8px);
+    }
+
+    .skeleton {
+      background: linear-gradient(90deg, #e2e8f0 0%, #f1f5f9 50%, #e2e8f0 100%);
+      background-size: 200% 100%;
+      animation: shine 1.4s infinite linear;
+    }
+
+    @keyframes shine {
+      0% {
+        background-position: 200% 0;
+      }
+
+      100% {
+        background-position: -200% 0;
+      }
+    }
+
+    details>summary {
+      list-style: none;
+      cursor: pointer;
+    }
+
+    details>summary::-webkit-details-marker {
+      display: none;
+    }
+  </style>
+</head>
+
+<body class="h-full bg-slate-50 text-slate-800 antialiased">
+
+  <!-- ===================== Header ===================== -->
+  <header class="gradient-hero text-white">
+    <div class="mx-auto max-w-7xl px-6 py-8">
+      <div class="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
+        <div class="flex items-center gap-4">
+          <div class="flex h-12 w-12 items-center justify-center rounded-xl bg-white/15 ring-1 ring-white/30">
+            <i data-lucide="waves" class="h-7 w-7"></i>
+          </div>
+          <div>
+            <h1 class="text-2xl font-bold tracking-tight md:text-3xl">Global Flood Event Dashboard</h1>
+            <p class="text-sm text-ocean-100">Unified view across Dartmouth FO, GloFAS, Copernicus EMS, EM-DAT &amp;
+              ReliefWeb</p>
+          </div>
+        </div>
+        <div class="flex items-center gap-3">
+          <span id="health-pill"
+            class="inline-flex items-center rounded-full bg-white/15 px-3 py-1.5 text-sm ring-1 ring-white/30">
+            <span class="pill-dot bg-amber-300 animate-pulse"></span>checking…
+          </span>
+          <a href="/docs"
+            class="inline-flex items-center gap-1.5 rounded-lg bg-white/10 px-3 py-1.5 text-sm font-medium ring-1 ring-white/30 hover:bg-white/20 transition">
+            <i data-lucide="book-open" class="h-4 w-4"></i>API docs
+          </a>
+          <a href="/api"
+            class="inline-flex items-center gap-1.5 rounded-lg bg-white/10 px-3 py-1.5 text-sm font-medium ring-1 ring-white/30 hover:bg-white/20 transition">
+            <i data-lucide="braces" class="h-4 w-4"></i>JSON
+          </a>
+        </div>
+      </div>
+    </div>
+  </header>
+
+  <main class="mx-auto max-w-7xl px-6 py-8 space-y-8">
+
+    <!-- ===================== KPI cards ===================== -->
+    <section aria-label="Key metrics" class="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
+      <!-- Cards rendered dynamically -->
+      <div class="kpi-card rounded-xl bg-white p-5 shadow-soft ring-1 ring-slate-200" data-key="events"></div>
+      <div class="kpi-card rounded-xl bg-white p-5 shadow-soft ring-1 ring-slate-200" data-key="sources"></div>
+      <div class="kpi-card rounded-xl bg-white p-5 shadow-soft ring-1 ring-slate-200" data-key="deaths"></div>
+      <div class="kpi-card rounded-xl bg-white p-5 shadow-soft ring-1 ring-slate-200" data-key="displaced"></div>
+    </section>
+
+    <!-- ===================== Charts row ===================== -->
+    <section class="grid grid-cols-1 gap-6 lg:grid-cols-2">
+
+      <!-- Monthly time series -->
+      <div class="rounded-xl bg-white p-6 shadow-soft ring-1 ring-slate-200">
+        <div class="flex items-center justify-between">
+          <div>
+            <h2 class="text-base font-semibold text-slate-900">Events per month</h2>
+            <p class="text-xs text-slate-500">Aggregated across all sources, with 12-month rolling mean.</p>
+          </div>
+          <i data-lucide="line-chart" class="h-5 w-5 text-ocean-600"></i>
+        </div>
+        <div class="mt-4"><canvas id="chart-monthly" height="220"></canvas></div>
+      </div>
+
+      <!-- Source breakdown -->
+      <div class="rounded-xl bg-white p-6 shadow-soft ring-1 ring-slate-200">
+        <div class="flex items-center justify-between">
+          <div>
+            <h2 class="text-base font-semibold text-slate-900">Events by source</h2>
+            <p class="text-xs text-slate-500">Total event count contributed by each source.</p>
+          </div>
+          <i data-lucide="pie-chart" class="h-5 w-5 text-ocean-600"></i>
+        </div>
+        <div class="mt-4"><canvas id="chart-sources" height="220"></canvas></div>
+      </div>
+
+      <!-- Top countries -->
+      <div class="rounded-xl bg-white p-6 shadow-soft ring-1 ring-slate-200">
+        <div class="flex items-center justify-between">
+          <div>
+            <h2 class="text-base font-semibold text-slate-900">Top 10 countries</h2>
+            <p class="text-xs text-slate-500">Ranked by total event count (`marts.flood_events_by_region`).</p>
+          </div>
+          <i data-lucide="map" class="h-5 w-5 text-ocean-600"></i>
+        </div>
+        <div class="mt-4"><canvas id="chart-countries" height="260"></canvas></div>
+      </div>
+
+      <!-- Severity histogram -->
+      <div class="rounded-xl bg-white p-6 shadow-soft ring-1 ring-slate-200">
+        <div class="flex items-center justify-between">
+          <div>
+            <h2 class="text-base font-semibold text-slate-900">Severity distribution</h2>
+            <p class="text-xs text-slate-500">Bucketed severity scores across reporting sources that publish one.</p>
+          </div>
+          <i data-lucide="bar-chart-3" class="h-5 w-5 text-ocean-600"></i>
+        </div>
+        <div class="mt-4"><canvas id="chart-severity" height="260"></canvas></div>
+      </div>
+    </section>
+
+    <!-- ===================== Filterable events table ===================== -->
+    <section class="rounded-xl bg-white p-6 shadow-soft ring-1 ring-slate-200">
+      <div class="flex flex-col gap-3 md:flex-row md:items-end md:justify-between">
+        <div>
+          <h2 class="text-base font-semibold text-slate-900">Recent flood events</h2>
+          <p class="text-xs text-slate-500">Live results from <code
+              class="rounded bg-slate-100 px-1 py-0.5 text-[11px]">/flood-events</code>. Filter, sort, paginate.</p>
+        </div>
+        <div class="flex flex-wrap items-end gap-3">
+          <label class="flex flex-col text-xs font-medium text-slate-600">
+            Source
+            <select id="filter-source"
+              class="mt-1 rounded-md border border-slate-300 bg-white px-3 py-1.5 text-sm shadow-sm focus:border-ocean-500 focus:outline-none focus:ring-1 focus:ring-ocean-500">
+              <option value="">All sources</option>
+            </select>
+          </label>
+          <label class="flex flex-col text-xs font-medium text-slate-600">
+            Country contains
+            <input id="filter-country" type="text" placeholder="e.g. India"
+              class="mt-1 rounded-md border border-slate-300 bg-white px-3 py-1.5 text-sm shadow-sm focus:border-ocean-500 focus:outline-none focus:ring-1 focus:ring-ocean-500" />
+          </label>
+          <label class="flex flex-col text-xs font-medium text-slate-600">
+            Limit
+            <select id="filter-limit"
+              class="mt-1 rounded-md border border-slate-300 bg-white px-3 py-1.5 text-sm shadow-sm focus:border-ocean-500 focus:outline-none focus:ring-1 focus:ring-ocean-500">
+              <option value="25">25</option>
+              <option value="50" selected>50</option>
+              <option value="100">100</option>
+              <option value="250">250</option>
+            </select>
+          </label>
+          <button id="filter-apply"
+            class="inline-flex items-center gap-1.5 rounded-md bg-ocean-600 px-4 py-1.5 text-sm font-semibold text-white shadow-sm hover:bg-ocean-700 transition">
+            <i data-lucide="filter" class="h-4 w-4"></i>Apply
+          </button>
+        </div>
+      </div>
+
+      <div class="mt-5 overflow-x-auto scrollbar-thin">
+        <table class="min-w-full divide-y divide-slate-200 text-sm">
+          <thead class="bg-slate-50 text-left text-xs font-semibold uppercase tracking-wider text-slate-500">
+            <tr>
+              <th class="px-3 py-2.5">Source</th>
+              <th class="px-3 py-2.5">Event ID</th>
+              <th class="px-3 py-2.5">Country</th>
+              <th class="px-3 py-2.5">Cause</th>
+              <th class="px-3 py-2.5">Date start</th>
+              <th class="px-3 py-2.5 text-right">Deaths</th>
+              <th class="px-3 py-2.5 text-right">Displaced</th>
+              <th class="px-3 py-2.5 text-right">Severity</th>
+            </tr>
+          </thead>
+          <tbody id="events-tbody" class="divide-y divide-slate-100 bg-white"></tbody>
+        </table>
+      </div>
+      <p id="events-meta" class="mt-3 text-xs text-slate-500"></p>
+    </section>
+
+    <!-- ===================== Endpoint explorer ===================== -->
+    <section class="rounded-xl bg-white p-6 shadow-soft ring-1 ring-slate-200">
+      <details open>
+        <summary class="flex items-center justify-between">
+          <div class="flex items-center gap-2">
+            <i data-lucide="terminal-square" class="h-5 w-5 text-ocean-600"></i>
+            <h2 class="text-base font-semibold text-slate-900">Endpoint explorer</h2>
+          </div>
+          <i data-lucide="chevron-down" class="h-4 w-4 text-slate-400 transition group-open:rotate-180"></i>
+        </summary>
+        <p class="mt-1 text-xs text-slate-500">Click any endpoint to call it and inspect the raw JSON response.</p>
+
+        <div id="endpoint-buttons" class="mt-4 flex flex-wrap gap-2"></div>
+
+        <div class="mt-4 grid gap-4 lg:grid-cols-[1fr,1fr]">
+          <div>
+            <div class="text-xs font-medium text-slate-600">Request</div>
+            <pre id="endpoint-request"
+              class="mt-1 max-h-32 overflow-auto rounded-md bg-slate-900 p-3 text-xs text-emerald-300 scrollbar-thin">// pick an endpoint above</pre>
+          </div>
+          <div>
+            <div class="text-xs font-medium text-slate-600">Response</div>
+            <pre id="endpoint-response"
+              class="mt-1 max-h-72 overflow-auto rounded-md bg-slate-900 p-3 text-xs text-slate-100 scrollbar-thin">// response will appear here</pre>
+          </div>
+        </div>
+      </details>
+    </section>
+
+    <!-- ===================== Footer ===================== -->
+    <footer class="pt-4 pb-10 text-center text-xs text-slate-500">
+      Global Flood Event Data Pipeline · FastAPI + PostGIS + Airflow · <a class="text-ocean-700 hover:underline"
+        href="/docs">Swagger</a> · <a class="text-ocean-700 hover:underline" href="/redoc">ReDoc</a>
+    </footer>
+  </main>
+
+  <script>
+    // ============================================================
+    //  Dashboard logic
+    // ============================================================
+    const API = ''; // same-origin
+    const SOURCE_COLORS = {
+      'Dartmouth_FO': '#0EA5E9',
+      'Dartmouth_MasterList': '#10B981',
+      'Copernicus_EMS': '#F59E0B',
+      'EM-DAT': '#8B5CF6',
+      'ReliefWeb': '#EF4444',
+    };
+    const fmt = new Intl.NumberFormat('en-US');
+    const KPI_DEFS = {
+      events: { label: 'Total events', icon: 'database', accent: 'text-ocean-600 bg-ocean-100' },
+      sources: { label: 'Active sources', icon: 'layers', accent: 'text-emerald-600 bg-emerald-100' },
+      deaths: { label: 'Total deaths', icon: 'skull', accent: 'text-rose-600 bg-rose-100' },
+      displaced: { label: 'Total displaced', icon: 'users-round', accent: 'text-amber-600 bg-amber-100' },
+    };
+
+    const charts = {};
+
+    // ---------- Helpers ----------
+    async function fetchJSON(path, params = {}) {
+      const url = new URL(path, window.location.origin);
+      Object.entries(params).forEach(([k, v]) => {
+        if (v !== '' && v !== null && v !== undefined) url.searchParams.set(k, v);
+      });
+      const r = await fetch(url, { headers: { 'Accept': 'application/json' } });
+      if (!r.ok) throw new Error(`${r.status} ${r.statusText}`);
+      return r.json();
+    }
+    const safe = v => (v === null || v === undefined || v === '') ? '—' : v;
+    const truncate = (s, n = 40) => (s == null ? '—' : (String(s).length > n ? String(s).slice(0, n - 1) + '…' : String(s)));
+
+    // ---------- KPI cards ----------
+    function renderKPICard(key, value, sub = '') {
+      const def = KPI_DEFS[key];
+      const card = document.querySelector(`.kpi-card[data-key="${key}"]`);
+      card.innerHTML = `
+        <div class="flex items-start justify-between">
+          <div>
+            <div class="text-xs font-medium uppercase tracking-wider text-slate-500">${def.label}</div>
+            <div class="mt-2 text-3xl font-bold tabular-nums text-slate-900">${value}</div>
+            ${sub ? `<div class="mt-1 text-xs text-slate-500">${sub}</div>` : ''}
+          </div>
+          <div class="flex h-10 w-10 items-center justify-center rounded-lg ${def.accent}">
+            <i data-lucide="${def.icon}" class="h-5 w-5"></i>
+          </div>
+        </div>`;
+      lucide.createIcons({ root: card });
+    }
+    function renderKPISkeletons() {
+      Object.keys(KPI_DEFS).forEach(k => renderKPICard(k, '<span class="inline-block h-8 w-20 rounded skeleton align-middle"></span>'));
+    }
+
+    // ---------- Health pill ----------
+    async function refreshHealth() {
+      const pill = document.getElementById('health-pill');
+      try {
+        const h = await fetchJSON('/health');
+        const ok = h.status === 'ok' && h.db === true;
+        const martTotal = h.marts ? Object.keys(h.marts).length : 0;
+        const martCount = h.marts ? Object.values(h.marts).filter(Boolean).length : 0;
+        pill.innerHTML = `<span class="pill-dot ${ok ? 'bg-emerald-400' : 'bg-rose-400'}"></span>${ok ? `Healthy · ${martCount}/${martTotal} marts` : 'Degraded'}`;
+      } catch (e) {
+        pill.innerHTML = `<span class="pill-dot bg-rose-400"></span>API unreachable`;
+      }
+    }
+
+    // ---------- Charts ----------
+    function makeChart(id, type, data, opts = {}) {
+      if (charts[id]) charts[id].destroy();
+      const ctx = document.getElementById(id);
+      charts[id] = new Chart(ctx, {
+        type, data,
+        options: Object.assign({
+          responsive: true,
+          maintainAspectRatio: false,
+          plugins: {
+            legend: { labels: { color: '#475569', font: { family: 'Inter', size: 12 } } },
+            tooltip: { backgroundColor: '#0f172a', titleFont: { family: 'Inter' }, bodyFont: { family: 'Inter' } }
+          },
+          scales: type === 'doughnut' ? {} : {
+            x: { ticks: { color: '#64748b' }, grid: { color: '#e2e8f0' } },
+            y: { ticks: { color: '#64748b' }, grid: { color: '#e2e8f0' }, beginAtZero: true }
+          }
+        }, opts),
+      });
+    }
+
+    function rolling(arr, w) {
+      const out = new Array(arr.length).fill(null);
+      for (let i = 0; i < arr.length; i++) {
+        if (i + 1 < w) continue;
+        let sum = 0;
+        for (let j = i + 1 - w; j <= i; j++) sum += arr[j];
+        out[i] = sum / w;
+      }
+      return out;
+    }
+
+    async function loadMonthly() {
+      const data = await fetchJSON('/analytics/by-month');
+      const labels = data.map(r => r.month?.slice(0, 7));
+      const counts = data.map(r => Number(r.event_count) || 0);
+      const roll = rolling(counts, 12);
+      makeChart('chart-monthly', 'line', {
+        labels,
+        datasets: [
+          { label: 'Monthly events', data: counts, borderColor: '#0EA5E9', backgroundColor: 'rgba(14,165,233,0.12)', fill: true, tension: 0.25, pointRadius: 0, borderWidth: 1.5 },
+          { label: '12-mo rolling', data: roll, borderColor: '#0F172A', borderDash: [4, 4], pointRadius: 0, fill: false, borderWidth: 2 },
+        ]
+      }, { scales: { x: { ticks: { maxTicksLimit: 10, color: '#64748b' }, grid: { display: false } }, y: { ticks: { color: '#64748b' } } } });
+      return { totalEvents: counts.reduce((a, b) => a + b, 0), span: `${labels[0] ?? ''} → ${labels[labels.length - 1] ?? ''}` };
+    }
+
+    async function loadCountries() {
+      const data = await fetchJSON('/flood-events/by-region', { limit: 10 });
+      makeChart('chart-countries', 'bar', {
+        labels: data.map(r => r.country ?? 'Unknown'),
+        datasets: [{
+          label: 'Events', data: data.map(r => Number(r.event_count) || 0),
+          backgroundColor: '#0EA5E9', borderRadius: 4
+        }]
+      }, { indexAxis: 'y', plugins: { legend: { display: false } } });
+    }
+
+    async function loadBySource() {
+      // Single server-side aggregate over marts.flood_events. Replaces an
+      // older per-source paginated probe that capped at 1000 rows/source
+      // and silently under-counted total events / deaths.
+      const data = await fetchJSON('/analytics/by-source');
+      const labels = data.map(r => r.source);
+      const values = data.map(r => Number(r.event_count) || 0);
+      makeChart('chart-sources', 'doughnut', {
+        labels,
+        datasets: [{
+          data: values,
+          backgroundColor: labels.map(s => SOURCE_COLORS[s] || '#94A3B8'),
+          borderWidth: 2, borderColor: '#fff'
+        }]
+      }, { cutout: '62%', plugins: { legend: { position: 'right' } } });
+      const totalsBySource = Object.fromEntries(
+        data.map(r => [r.source, Number(r.event_count) || 0])
+      );
+      return {
+        totalsBySource,
+        activeCount: data.length,
+        totalEvents: data.reduce((a, r) => a + (Number(r.event_count) || 0), 0),
+        totalDeaths: data.reduce((a, r) => a + (Number(r.total_deaths) || 0), 0),
+        totalDisplaced: data.reduce((a, r) => a + (Number(r.total_displaced) || 0), 0),
+      };
+    }
+
+    async function loadSeverity() {
+      const data = await fetchJSON('/flood-events/by-severity', { min_severity: 0, max_severity: 10, limit: 5000 });
+      const buckets = [0, 0, 0, 0, 0, 0]; // 0–1, 1–2, 2–3, 3–4, 4–5, 5+
+      data.forEach(r => {
+        const s = Number(r.severity);
+        if (!isFinite(s)) return;
+        const i = Math.min(5, Math.floor(s));
+        buckets[i] += 1;
+      });
+      makeChart('chart-severity', 'bar', {
+        labels: ['<1', '1–2', '2–3', '3–4', '4–5', '≥5'],
+        datasets: [{ label: 'Events', data: buckets, backgroundColor: '#0EA5E9', borderRadius: 4 }]
+      }, { plugins: { legend: { display: false } } });
+    }
+
+    // ---------- Events table ----------
+    async function loadEvents() {
+      const source = document.getElementById('filter-source').value;
+      const country = document.getElementById('filter-country').value.trim();
+      const limit = document.getElementById('filter-limit').value;
+      const tbody = document.getElementById('events-tbody');
+      const meta = document.getElementById('events-meta');
+      tbody.innerHTML = `<tr><td colspan="8" class="px-3 py-6 text-center text-slate-400">Loading…</td></tr>`;
+
+      let path = '/flood-events';
+      let params = { limit, source };
+      if (country) {
+        // We have to swap to by-region for country filtering, which returns rollups.
+        // To keep an event-level table, do client-side filter on /flood-events when country is set.
+        params = { limit, source };
+      }
+      try {
+        const rows = await fetchJSON(path, params);
+        let filtered = rows;
+        if (country) {
+          const needle = country.toLowerCase();
+          filtered = rows.filter(r => (r.country || '').toLowerCase().includes(needle));
+        }
+        if (filtered.length === 0) {
+          tbody.innerHTML = `<tr><td colspan="8" class="px-3 py-8 text-center text-slate-400">No events match those filters.</td></tr>`;
+          meta.textContent = '';
+          return;
+        }
+        tbody.innerHTML = filtered.map(r => `
+          <tr class="hover:bg-slate-50">
+            <td class="px-3 py-2 font-medium" style="color:${SOURCE_COLORS[r.source] || '#0F172A'}">${safe(r.source)}</td>
+            <td class="px-3 py-2 text-slate-600 font-mono text-xs">${truncate(r.source_event_id, 20)}</td>
+            <td class="px-3 py-2">${safe(r.country)}</td>
+            <td class="px-3 py-2 text-slate-600">${truncate(r.main_cause, 30)}</td>
+            <td class="px-3 py-2 text-slate-600 tabular-nums">${r.date_start ? r.date_start.slice(0, 10) : '—'}</td>
+            <td class="px-3 py-2 text-right tabular-nums">${r.deaths ?? '—'}</td>
+            <td class="px-3 py-2 text-right tabular-nums">${r.displaced ?? '—'}</td>
+            <td class="px-3 py-2 text-right tabular-nums">${r.severity != null ? Number(r.severity).toFixed(1) : '—'}</td>
+          </tr>`).join('');
+        meta.textContent = `Showing ${filtered.length} of ${rows.length} fetched · source=${source || '(any)'} · country~"${country || ''}"`;
+      } catch (e) {
+        tbody.innerHTML = `<tr><td colspan="8" class="px-3 py-6 text-center text-rose-600">Error: ${e.message}</td></tr>`;
+        meta.textContent = '';
+      }
+    }
+
+    function populateSourceFilter(totals) {
+      const sel = document.getElementById('filter-source');
+      Object.keys(totals).forEach(s => {
+        if (totals[s] > 0) {
+          const o = document.createElement('option');
+          o.value = s; o.textContent = `${s} (${fmt.format(totals[s])})`;
+          sel.appendChild(o);
+        }
+      });
+    }
+
+    // ---------- Endpoint explorer ----------
+    const ENDPOINTS = [
+      { method: 'GET', path: '/health', label: 'Health' },
+      { method: 'GET', path: '/flood-events?limit=10', label: 'Recent events' },
+      { method: 'GET', path: '/flood-events/by-region?limit=10', label: 'By region' },
+      { method: 'GET', path: '/flood-events/by-time?start=2020-01-01', label: 'By time' },
+      { method: 'GET', path: '/flood-events/by-severity?min_severity=4', label: 'By severity' },
+      { method: 'GET', path: '/analytics/frequency-by-basin', label: 'Frequency by basin' },
+      { method: 'GET', path: '/analytics/by-month', label: 'By month' },
+      { method: 'GET', path: '/analytics/by-source', label: 'By source' },
+    ];
+    function buildEndpointButtons() {
+      const wrap = document.getElementById('endpoint-buttons');
+      wrap.innerHTML = ENDPOINTS.map(e => `
+        <button data-path="${e.path}" class="endpoint-btn group inline-flex items-center gap-2 rounded-lg border border-slate-200 bg-slate-50 px-3 py-1.5 text-xs font-medium text-slate-700 hover:border-ocean-400 hover:bg-ocean-50 hover:text-ocean-700 transition">
+          <span class="font-mono text-[10px] font-semibold text-emerald-600 group-hover:text-emerald-700">${e.method}</span>
+          <span class="font-mono">${e.path}</span>
+        </button>`).join('');
+      wrap.querySelectorAll('button.endpoint-btn').forEach(btn => {
+        btn.addEventListener('click', async () => {
+          const path = btn.dataset.path;
+          const reqBox = document.getElementById('endpoint-request');
+          const resBox = document.getElementById('endpoint-response');
+          reqBox.textContent = `GET ${path}`;
+          resBox.textContent = '// loading…';
+          try {
+            const r = await fetch(path, { headers: { 'Accept': 'application/json' } });
+            const text = await r.text();
+            try { resBox.textContent = JSON.stringify(JSON.parse(text), null, 2); }
+            catch { resBox.textContent = text; }
+          } catch (e) { resBox.textContent = `// error: ${e.message}`; }
+        });
+      });
+    }
+
+    // ---------- Init ----------
+    async function init() {
+      lucide.createIcons();
+      renderKPISkeletons();
+      buildEndpointButtons();
+      refreshHealth();
+      try {
+        const [monthly, , bySource] = await Promise.all([
+          loadMonthly(),
+          loadCountries(),
+          loadBySource(),
+          loadSeverity(),
+        ]);
+        renderKPICard('events', fmt.format(bySource.totalEvents), monthly.span);
+        renderKPICard('sources', String(bySource.activeCount), `Of ${Object.keys(SOURCE_COLORS).length} configured`);
+        renderKPICard('deaths', fmt.format(bySource.totalDeaths));
+        renderKPICard('displaced', fmt.format(bySource.totalDisplaced));
+        populateSourceFilter(bySource.totalsBySource);
+      } catch (e) {
+        console.error('init failed', e);
+        ['events', 'sources', 'deaths', 'displaced'].forEach(k => renderKPICard(k, '—', 'API unreachable'));
+      }
+      loadEvents();
+      document.getElementById('filter-apply').addEventListener('click', loadEvents);
+      document.getElementById('filter-country').addEventListener('keydown', e => { if (e.key === 'Enter') loadEvents(); });
+    }
+    init();
+  </script>
+</body>
+
+</html>

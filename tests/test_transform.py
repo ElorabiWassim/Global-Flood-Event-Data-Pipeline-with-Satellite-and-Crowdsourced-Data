@@ -211,12 +211,12 @@ class TestNormalizeGlofas:
         )
         assert len(rows) == 1
         r = rows[0]
-        assert r["source"] == "GloFAS"
+        assert r["source"] == "Dartmouth_MasterList"
         assert r["source_event_id"] == "GFD-1"
         assert r["country"] == "Bangladesh"
         assert r["deaths"] == 50
         assert r["severity"] == 2.0
-        # GloFAS CSV has no per-event coords -> no H3
+        # The DFO MasterList CSV has no per-event coords -> no H3
         assert r["latitude"] is None
         assert r["h3_index"] is None
 

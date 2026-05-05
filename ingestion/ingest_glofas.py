@@ -1,21 +1,25 @@
 """
-Ingest GloFAS / Global Active Archive of Large Flood Events.
+Ingest the Dartmouth Flood Observatory live MasterList.
 
-Two related sources are covered here:
+Despite the historical filename ``glofas_events`` (kept for backwards
+compatibility with the existing raw schema), this ingester does NOT pull
+from the Copernicus Global Flood Awareness System. The public ``MasterList``
+XLSX at ``floodobservatory.colorado.edu`` is the live vintage of the same
+Dartmouth Flood Observatory "Global Active Archive of Large Floods" that
+``ingest_dartmouth.py`` pulls from HDX (frozen 2019 vintage).
 
-1. The Copernicus Global Flood Awareness System (GloFAS) reanalysis product is
-   distributed via the Copernicus Climate Data Store (CDS). It REQUIRES a
-   personal CDS API key (UID + API key in ``~/.cdsapirc``). When the key is
-   present in the environment (``CDS_API_KEY`` / ``CDS_API_URL``), an
-   integration point is exposed below for completing that download.
+We call this source ``Dartmouth_MasterList`` to make the lineage explicit
+and to enable downstream deduplication against ``Dartmouth_FO`` (see the
+``marts.flood_events_unique`` view).
 
-2. As an immediately-usable companion dataset, the Global Active Archive of
-   Large Flood Events (Brakenridge / DFO) is publicly downloadable as the
-   "Global Flood Records" CSV. We use that file as the canonical fallback
-   so the pipeline always has data even when CDS credentials are missing.
+The Copernicus GloFAS reanalysis product is a separate dataset entirely
+(NetCDF streamflow grids via the CDS API). If ``CDS_API_KEY`` /
+``CDS_API_URL`` are present an integration point can be added here, but it
+would feed a different raw table (e.g. ``raw.glofas_reanalysis``) and a
+different normalizer.
 
-In both cases, raw rows land in ``raw.glofas_events`` with their original
-column names preserved as a JSONB payload.
+Raw rows land in ``raw.glofas_events`` with their original column names
+preserved as a JSONB payload.
 """
 
 from __future__ import annotations
@@ -39,8 +43,13 @@ from .common import (
 
 logger = logging.getLogger(__name__)
 
-SOURCE = "GloFAS"
-# Public Global Active Archive of Large Floods
+# Canonical source label written into staging.flood_events.source. The raw
+# table name is kept as ``glofas_events`` for backwards compatibility (it is
+# a stable historical identifier) but the analytical layer sees this source
+# as ``Dartmouth_MasterList`` so it can be deduplicated against the HDX
+# ``Dartmouth_FO`` vintage.
+SOURCE = "Dartmouth_MasterList"
+# Public DFO Global Active Archive of Large Floods (live MasterList).
 PUBLIC_URL = "https://floodobservatory.colorado.edu/temp/MasterListrev.xlsx"
 RAW_TABLE = "glofas_events"
 SEED_FILE_NAME = "global_flood_records.csv"
@@ -69,12 +78,14 @@ def run(*, full_refresh: bool = True) -> int:
     target_file = target_dir / "global_flood_records.xlsx"
 
     if _has_cds_credentials():
-        # Real CDS integration would go here: requires the cdsapi package and
-        # downloads NetCDF reanalysis grids. We leave a clear placeholder
-        # rather than fabricate data. Operators can extend this branch.
+        # Real Copernicus GloFAS reanalysis integration would go here: it
+        # requires the cdsapi package and downloads NetCDF streamflow grids,
+        # which would feed a separate raw table and normalizer. We leave a
+        # clear placeholder rather than fabricate data.
         logger.info(
-            "[%s] CDS credentials detected — extend this function to call "
-            "the cdsapi client. Falling back to public archive for now.",
+            "[%s] CDS credentials detected — a real GloFAS reanalysis "
+            "ingester would write to its own raw table. Falling back to "
+            "the public DFO MasterList for now.",
             SOURCE,
         )
 
