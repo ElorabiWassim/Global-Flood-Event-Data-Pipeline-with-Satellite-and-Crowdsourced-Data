@@ -63,9 +63,20 @@ def _validate_endpoints(**_) -> None:
         "ReliefWeb": "https://api.reliefweb.int/v2/disasters?limit=1",
         "Copernicus_EMS": "https://emergency.copernicus.eu/mapping/list-of-activations-rapid",
     }
+    if os.getenv("ENABLE_SOCIAL_MEDIA_INGESTION", "false").lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }:
+        urls["Bluesky"] = (
+            "https://public.api.bsky.app/xrpc/app.bsky.feed.searchPosts"
+            "?q=flood&limit=1"
+        )
     for name, url in urls.items():
         try:
-            r = requests.head(url, timeout=15, allow_redirects=True)
+            method = requests.get if name == "Bluesky" else requests.head
+            r = method(url, timeout=15, allow_redirects=True)
             logger.info("[endpoint] %s -> HTTP %s", name, r.status_code)
         except Exception as exc:  # noqa: BLE001
             logger.warning("[endpoint] %s unreachable: %s", name, exc)
@@ -97,6 +108,25 @@ def _ingest_emdat(**_) -> None:
 
 def _ingest_reliefweb(**_) -> None:
     from ingestion.ingest_reliefweb import run
+
+    run()
+
+
+def _ingest_bluesky(**_) -> None:
+    enabled = os.getenv("ENABLE_SOCIAL_MEDIA_INGESTION", "false").lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+    if not enabled:
+        logger.info(
+            "Bluesky ingestion disabled. Set ENABLE_SOCIAL_MEDIA_INGESTION=true "
+            "to collect public social flood signals."
+        )
+        return
+
+    from ingestion.ingest_bluesky import run
 
     run()
 
@@ -173,6 +203,10 @@ with DAG(
         task_id="ingest_reliefweb",
         python_callable=_ingest_reliefweb,
     )
+    ingest_bluesky = PythonOperator(
+        task_id="ingest_bluesky",
+        python_callable=_ingest_bluesky,
+    )
 
     transform_raw_to_staging = PythonOperator(
         task_id="transform_raw_to_staging",
@@ -215,6 +249,7 @@ with DAG(
         ingest_copernicus_ems,
         ingest_emdat,
         ingest_reliefweb,
+        ingest_bluesky,
     ]
     for t in ingest_tasks:
         validate_endpoints >> t >> transform_raw_to_staging

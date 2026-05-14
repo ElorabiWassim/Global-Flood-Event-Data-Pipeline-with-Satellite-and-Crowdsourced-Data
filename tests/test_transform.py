@@ -10,7 +10,11 @@ from __future__ import annotations
 
 from datetime import datetime
 
+import pytest
+
 from transformations.transform import (
+    SOCIAL_SIGNAL_UPSERT_SQL,
+    _as_text_list,
     _find_basin,
     _h3_for,
     _normalize_copernicus_ems,
@@ -18,11 +22,18 @@ from transformations.transform import (
     _normalize_emdat,
     _normalize_glofas,
     _normalize_reliefweb,
+    _normalize_social_media_posts,
     _parse_date,
+    _social_flood_relevance_score,
+    _social_location_confidence,
+    _social_source_confidence,
+    _social_signal_confidence,
     _to_float,
     _to_int,
+    _upsert_social_signals,
     _ymd_to_date,
 )
+import transformations.transform as transform_module
 
 
 # ---------------------------------------------------------------------------
@@ -114,7 +125,10 @@ class TestYmdToDate:
 class TestH3For:
     def test_valid_coords(self):
         idx = _h3_for(48.85, 2.35)  # Paris
-        assert isinstance(idx, str) and len(idx) > 0
+        if transform_module.h3 is None:
+            assert idx is None
+        else:
+            assert isinstance(idx, str) and len(idx) > 0
 
     def test_none_coords(self):
         assert _h3_for(None, 2.35) is None
@@ -123,6 +137,17 @@ class TestH3For:
     def test_out_of_range(self):
         assert _h3_for(100.0, 2.35) is None
         assert _h3_for(48.85, 200.0) is None
+
+
+class TestAsTextList:
+    def test_none_is_empty(self):
+        assert _as_text_list(None) == []
+
+    def test_string_becomes_singleton(self):
+        assert _as_text_list("flood") == ["flood"]
+
+    def test_iterable_is_cleaned(self):
+        assert _as_text_list(["flood", "", None, " rain "]) == ["flood", "rain"]
 
 
 # ---------------------------------------------------------------------------
@@ -191,7 +216,10 @@ class TestNormalizeDartmouth:
         assert r["deaths"] == 12
         assert r["severity"] == 1.5
         assert r["main_cause"] == "Heavy rain"
-        assert r["h3_index"] is not None  # coords present -> H3 generated
+        if transform_module.h3 is None:
+            assert r["h3_index"] is None
+        else:
+            assert r["h3_index"] is not None  # coords present -> H3 generated
         assert r["river_basin"] is None  # Dartmouth has no basin field
 
 
@@ -333,6 +361,262 @@ class TestNormalizeReliefweb:
         assert r["main_cause"] == "Flood"
         assert isinstance(r["date_start"], datetime)
         assert r["url"] == "https://reliefweb.int/disaster/9999"
+
+
+class TestNormalizeSocialMediaPosts:
+    def test_social_post_with_coordinates_gets_h3_and_scores(self):
+        rows = _normalize_social_media_posts(
+            [
+                {
+                    "platform": "bluesky",
+                    "post_id": "at://did/app.bsky.feed.post/abc",
+                    "created_at": "2026-05-13T10:00:00Z",
+                    "text": "Flash flood near the river, road closed",
+                    "language": "en",
+                    "url": "https://bsky.app/profile/u/post/abc",
+                    "author_id_hash": "hash",
+                    "matched_keywords": ["flash flood", "flood"],
+                    "matched_context_terms": ["river", "road"],
+                    "matched_strong_terms": ["flash flood"],
+                    "excluded_keywords": [],
+                    "filter_score": 0.75,
+                    "source_confidence": 0.6,
+                    "country": "France",
+                    "latitude": 48.85,
+                    "longitude": 2.35,
+                    "raw_payload": {"uri": "at://did/app.bsky.feed.post/abc"},
+                }
+            ]
+        )
+
+        assert len(rows) == 1
+        r = rows[0]
+        assert r["platform"] == "bluesky"
+        assert r["post_id"] == "at://did/app.bsky.feed.post/abc"
+        assert r["source_event_id"].startswith("bluesky:")
+        assert isinstance(r["created_at"], datetime)
+        assert r["matched_keywords"] == ["flash flood", "flood"]
+        assert r["flood_relevance_score"] > 0.5
+        assert r["location_confidence"] == 1.0
+        assert r["signal_confidence"] > 0.0
+        if transform_module.h3 is None:
+            assert r["h3_index"] is None
+        else:
+            assert r["h3_index"] is not None
+        assert r["raw_payload"] == {"uri": "at://did/app.bsky.feed.post/abc"}
+
+    def test_social_false_positive_scores_zero(self):
+        payload = {
+            "text": "A flood of emails arrived",
+            "matched_keywords": ["flood"],
+            "excluded_keywords": ["flood of emails"],
+            "created_at": "2026-05-13T10:00:00Z",
+        }
+
+        assert _social_flood_relevance_score(payload) == 0.0
+        assert _social_signal_confidence(payload) == 0.0
+
+    def test_social_keyword_without_context_scores_lower_than_contextual_post(self):
+        weak = {
+            "platform": "bluesky",
+            "post_id": "1",
+            "text": "flood",
+            "matched_keywords": ["flood"],
+            "created_at": "2026-05-13T10:00:00Z",
+        }
+        contextual = {
+            "platform": "bluesky",
+            "post_id": "2",
+            "text": "flooding downtown after heavy rain, road closed",
+            "matched_keywords": ["flooding"],
+            "matched_context_terms": ["downtown", "rain", "road"],
+            "filter_score": 0.7,
+            "created_at": "2026-05-13T10:00:00Z",
+        }
+
+        assert _social_flood_relevance_score(contextual) > _social_flood_relevance_score(weak)
+        assert _social_signal_confidence(contextual) > _social_signal_confidence(weak)
+
+    def test_location_confidence_levels(self):
+        assert _social_location_confidence({"latitude": 1, "longitude": 2}) == 1.0
+        assert _social_location_confidence({"place_name": "Paris", "country": "France"}) == 0.75
+        assert _social_location_confidence({"country": "France"}) == 0.5
+        assert _social_location_confidence({"place_name": "Paris"}) == 0.35
+        assert _social_location_confidence({}) == 0.0
+
+    def test_source_confidence_is_not_truth_confirmation(self):
+        assert _social_source_confidence({"platform": "bluesky", "post_id": "p"}) == 0.6
+        assert _social_source_confidence({"source_confidence": 0.9}) == 0.9
+        assert _social_source_confidence({}) == 0.3
+
+    def test_normalize_infers_country_and_place_when_missing(self):
+        # Raw row from Bluesky with no structured location; the normalizer
+        # must call the text extractor and fill country/place_name.
+        rows = _normalize_social_media_posts(
+            [
+                {
+                    "platform": "bluesky",
+                    "post_id": "no-loc",
+                    "text": "Flash flood warning for Baton Rouge, LA after heavy rain",
+                    "matched_keywords": ["flash flood"],
+                    "excluded_keywords": [],
+                    "created_at": "2026-05-13T10:00:00Z",
+                }
+            ]
+        )
+
+        assert rows[0]["country"] == "United States"
+        assert rows[0]["place_name"] == "Baton Rouge, Louisiana"
+        # Location confidence should reflect the new place+country tier (0.75)
+        # not the previous "no location clue" tier (0.0).
+        assert rows[0]["location_confidence"] == pytest.approx(0.75)
+
+    def test_normalize_does_not_overwrite_explicit_location(self):
+        # If the ingester already supplied country/place_name (e.g. a future
+        # Mastodon source with structured place metadata) the normalizer
+        # must NOT clobber them with a weaker text inference.
+        rows = _normalize_social_media_posts(
+            [
+                {
+                    "platform": "bluesky",
+                    "post_id": "with-loc",
+                    "text": "Heavy rain across Spain",
+                    "country": "France",
+                    "place_name": "Paris",
+                    "matched_keywords": ["flood"],
+                    "matched_context_terms": ["rain"],
+                    "excluded_keywords": [],
+                    "created_at": "2026-05-13T10:00:00Z",
+                }
+            ]
+        )
+
+        assert rows[0]["country"] == "France"
+        assert rows[0]["place_name"] == "Paris"
+
+    def test_transform_re_evaluates_current_exclusions_for_self_healing(self):
+        # The raw payload was admitted by an older (laxer) filter that did not
+        # have a "flood Congress" rule. The new transformer must drop the
+        # relevance score to 0 and surface the new exclusion in
+        # ``excluded_keywords`` so the upsert path will delete it from
+        # staging.
+        rows = _normalize_social_media_posts(
+            [
+                {
+                    "platform": "bluesky",
+                    "post_id": "old-political",
+                    "text": "We have to flood Congress today",
+                    "matched_keywords": ["flood"],
+                    "excluded_keywords": [],
+                    "created_at": "2026-05-13T10:00:00Z",
+                }
+            ]
+        )
+
+        assert len(rows) == 1
+        r = rows[0]
+        assert r["flood_relevance_score"] == 0.0
+        assert r["signal_confidence"] == 0.0
+        assert r["excluded_keywords"], "expected re-evaluated exclusions"
+        assert any(
+            excl.startswith("political_metaphor")
+            for excl in r["excluded_keywords"]
+        )
+
+    def test_upsert_social_signals_deletes_newly_excluded_rows(self, monkeypatch):
+        # Two rows: one valid (must be UPSERTed), one newly excluded (must
+        # be DELETEd from staging). Verify the upsert helper issues both
+        # statements and reports only the insert count.
+        from transformations.transform import SOCIAL_SIGNAL_DELETE_SQL
+
+        calls = []
+        monkeypatch.setattr(
+            transform_module,
+            "execute_with_retry",
+            lambda sql, params: calls.append((sql, params)),
+        )
+
+        rows = [
+            {
+                "platform": "bluesky",
+                "post_id": "good-1",
+                "created_at": "2026-05-13T10:00:00Z",
+                "matched_keywords": ["flooding"],
+                "excluded_keywords": [],
+                "flood_relevance_score": 0.7,
+                "signal_confidence": 0.6,
+                "raw_payload": {"x": 1},
+            },
+            {
+                "platform": "bluesky",
+                "post_id": "now-excluded-1",
+                "created_at": "2026-05-13T10:00:00Z",
+                "matched_keywords": ["flood"],
+                # New rule retroactively flagged this row.
+                "excluded_keywords": ["political_metaphor:flood_the_<institution>"],
+                "flood_relevance_score": 0.0,
+                "signal_confidence": 0.0,
+                "raw_payload": {"x": 2},
+            },
+        ]
+
+        assert _upsert_social_signals(rows) == 1
+        # Expect 2 statements: 1 UPSERT chunk + 1 DELETE chunk.
+        assert len(calls) == 2
+        upsert_sql, upsert_params = calls[0]
+        delete_sql, delete_params = calls[1]
+        assert upsert_sql is SOCIAL_SIGNAL_UPSERT_SQL
+        assert delete_sql is SOCIAL_SIGNAL_DELETE_SQL
+        assert upsert_params[0]["post_id"] == "good-1"
+        assert delete_params == [{"platform": "bluesky", "post_id": "now-excluded-1"}]
+
+    def test_upsert_social_signals_filters_invalid_rows(self, monkeypatch):
+        calls = []
+        monkeypatch.setattr(
+            transform_module,
+            "execute_with_retry",
+            lambda sql, params: calls.append((sql, params)),
+        )
+
+        rows = [
+            {
+                "platform": "bluesky",
+                "post_id": "post-1",
+                "source_event_id": "bluesky:post-1",
+                "created_at": datetime(2026, 5, 13, 10, 0, 0),
+                "ingested_at": None,
+                "text": "flooding downtown",
+                "language": "en",
+                "url": None,
+                "author_id_hash": "hash",
+                "matched_keywords": ["flooding"],
+                "excluded_keywords": [],
+                "flood_relevance_score": 0.55,
+                "location_confidence": 0.0,
+                "signal_confidence": 0.48,
+                "place_name": None,
+                "country": None,
+                "latitude": None,
+                "longitude": None,
+                "h3_index": None,
+                "raw_payload": {"x": 1},
+            },
+            {
+                "platform": "bluesky",
+                "post_id": "post-2",
+                "created_at": datetime(2026, 5, 13, 10, 0, 0),
+                "matched_keywords": [],
+                "signal_confidence": 0.0,
+            },
+        ]
+
+        assert _upsert_social_signals(rows) == 1
+        assert len(calls) == 1
+        sql, params = calls[0]
+        assert sql is SOCIAL_SIGNAL_UPSERT_SQL
+        assert len(params) == 1
+        assert params[0]["post_id"] == "post-1"
+        assert params[0]["raw_payload"] == '{"x": 1}'
 
 
 # ---------------------------------------------------------------------------

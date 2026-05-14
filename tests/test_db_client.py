@@ -5,7 +5,10 @@ from __future__ import annotations
 import json
 import math
 
-from db.client import _clean_for_json
+import pytest
+
+import db.client as db_client
+from db.client import _clean_for_json, insert_social_media_posts
 
 
 class TestCleanForJsonScalars:
@@ -97,3 +100,74 @@ def test_isnan_helper_consistency():
     # obvious if someone "optimises" the float check.
     assert math.isnan(float("nan"))
     assert _clean_for_json(float("nan")) is None
+
+
+class TestInsertSocialMediaPosts:
+    def test_empty_records_do_not_execute(self, monkeypatch):
+        calls = []
+        monkeypatch.setattr(
+            db_client,
+            "execute_with_retry",
+            lambda sql, params: calls.append((sql, params)),
+        )
+
+        out = insert_social_media_posts(
+            [],
+            platform="bluesky",
+            source="Bluesky",
+            source_url="https://example.test",
+            file_path=None,
+            batch_id="batch-1",
+        )
+
+        assert out == 0
+        assert calls == []
+
+    def test_builds_social_media_rows_and_upsert_sql(self, monkeypatch):
+        calls = []
+        monkeypatch.setattr(
+            db_client,
+            "execute_with_retry",
+            lambda sql, params: calls.append((str(sql), params)),
+        )
+
+        out = insert_social_media_posts(
+            [
+                {
+                    "post_id": "post-1",
+                    "text": "Flooding near the river",
+                    "score": float("nan"),
+                }
+            ],
+            platform="bluesky",
+            source="Bluesky",
+            source_url="https://bsky.app",
+            file_path="data/raw/social_media/bluesky/snapshot.json",
+            batch_id="bluesky-1",
+        )
+
+        assert out == 1
+        assert len(calls) == 1
+        sql, params = calls[0]
+        assert "INSERT INTO raw.social_media_posts" in sql
+        assert "ON CONFLICT (platform, post_id) DO UPDATE" in sql
+        assert params[0]["platform"] == "bluesky"
+        assert params[0]["source"] == "Bluesky"
+        assert params[0]["post_id"] == "post-1"
+        assert params[0]["batch_id"] == "bluesky-1"
+        assert json.loads(params[0]["payload"]) == {
+            "post_id": "post-1",
+            "text": "Flooding near the river",
+            "score": None,
+        }
+
+    def test_missing_post_id_raises_clear_error(self):
+        with pytest.raises(ValueError, match="post_id"):
+            insert_social_media_posts(
+                [{"text": "Flooding near the river"}],
+                platform="bluesky",
+                source="Bluesky",
+                source_url="https://bsky.app",
+                file_path=None,
+                batch_id="bluesky-1",
+            )

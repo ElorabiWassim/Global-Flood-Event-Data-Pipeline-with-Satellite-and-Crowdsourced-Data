@@ -52,6 +52,9 @@ _DDL_STATEMENTS: list[str] = [
     "DROP VIEW IF EXISTS marts.flood_events_by_h3       CASCADE;",
     "DROP VIEW IF EXISTS marts.flood_frequency_by_basin CASCADE;",
     "DROP VIEW IF EXISTS marts.flood_events_by_month    CASCADE;",
+    "DROP VIEW IF EXISTS marts.flood_events_with_social_signals CASCADE;",
+    "DROP VIEW IF EXISTS marts.social_signals_by_country_day CASCADE;",
+    "DROP VIEW IF EXISTS marts.social_flood_signals     CASCADE;",
     "DROP VIEW IF EXISTS marts.flood_events_unique      CASCADE;",
     "DROP VIEW IF EXISTS marts.flood_events             CASCADE;",
     # ---- Flat raw projection over staging (preserves both DFO vintages) --
@@ -153,6 +156,91 @@ _DDL_STATEMENTS: list[str] = [
         loaded_at
     FROM ranked
     WHERE rn = 1;
+    """,
+    # ---- Social-media flood signal projection ---------------------------
+    """
+    CREATE OR REPLACE VIEW marts.social_flood_signals AS
+    SELECT
+        id,
+        platform,
+        post_id,
+        source_event_id,
+        created_at,
+        ingested_at,
+        text,
+        language,
+        url,
+        author_id_hash,
+        matched_keywords,
+        excluded_keywords,
+        flood_relevance_score,
+        location_confidence,
+        signal_confidence,
+        place_name,
+        country,
+        latitude,
+        longitude,
+        ST_AsGeoJSON(geometry)::json AS geometry_geojson,
+        h3_index,
+        loaded_at
+    FROM staging.social_flood_signals;
+    """,
+    # ---- Daily country rollup of social flood signals --------------------
+    # Per-day, per-country counts and average confidence. Useful for spotting
+    # bursts of public flood chatter that operators may want to compare
+    # against authoritative flood-event sources before triggering alerts.
+    """
+    CREATE OR REPLACE VIEW marts.social_signals_by_country_day AS
+    SELECT
+        COALESCE(country, 'unknown')               AS country,
+        DATE_TRUNC('day', created_at)::DATE        AS signal_date,
+        COUNT(*)::bigint                           AS signal_count,
+        AVG(signal_confidence)                     AS avg_signal_confidence,
+        COUNT(*) FILTER (
+            WHERE signal_confidence >= 0.5
+        )::bigint                                  AS high_confidence_count,
+        ARRAY_REMOVE(ARRAY_AGG(DISTINCT platform), NULL)
+                                                   AS platforms,
+        ARRAY_REMOVE(ARRAY_AGG(DISTINCT language), NULL)
+                                                   AS languages
+    FROM staging.social_flood_signals
+    WHERE created_at IS NOT NULL
+    GROUP BY country, signal_date;
+    """,
+    # ---- Deduped events enriched with nearby social signals --------------
+    """
+    CREATE OR REPLACE VIEW marts.flood_events_with_social_signals AS
+    WITH social_matches AS (
+        SELECT
+            e.id AS event_id,
+            COUNT(s.id) FILTER (WHERE s.id IS NOT NULL) AS social_signal_count,
+            MIN(s.created_at)                           AS first_social_signal_at,
+            MAX(s.created_at)                           AS latest_social_signal_at,
+            AVG(s.signal_confidence)                    AS avg_social_signal_confidence,
+            ARRAY_REMOVE(ARRAY_AGG(DISTINCT s.platform), NULL)
+                                                        AS social_platforms
+        FROM marts.flood_events_unique e
+        LEFT JOIN staging.social_flood_signals s
+          ON s.signal_confidence > 0
+         AND s.created_at >= e.date_start - INTERVAL '1 day'
+         AND s.created_at <= COALESCE(e.date_end, e.date_start) + INTERVAL '3 days'
+         AND (
+                (e.h3_index IS NOT NULL AND s.h3_index IS NOT NULL
+                 AND e.h3_index = s.h3_index)
+             OR (e.country IS NOT NULL AND s.country IS NOT NULL
+                 AND lower(e.country) = lower(s.country))
+         )
+        GROUP BY e.id
+    )
+    SELECT
+        e.*,
+        COALESCE(m.social_signal_count, 0) AS social_signal_count,
+        m.first_social_signal_at,
+        m.latest_social_signal_at,
+        m.avg_social_signal_confidence,
+        COALESCE(m.social_platforms, ARRAY[]::text[]) AS social_platforms
+    FROM marts.flood_events_unique e
+    LEFT JOIN social_matches m ON m.event_id = e.id;
     """,
     # ---- Region rollup (over deduped events) ------------------------------
     """
