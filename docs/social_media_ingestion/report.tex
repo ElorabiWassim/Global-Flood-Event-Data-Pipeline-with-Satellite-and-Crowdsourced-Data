@@ -1,0 +1,845 @@
+\documentclass[11pt]{article}
+
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{lmodern}
+\usepackage{microtype}
+\usepackage{geometry}
+\usepackage{hyperref}
+\usepackage{booktabs}
+\usepackage{listings}
+\usepackage{xcolor}
+\usepackage{enumitem}
+
+\geometry{a4paper, margin=1in}
+\hypersetup{
+    colorlinks=true,
+    linkcolor=black,
+    urlcolor=blue!60!black,
+    pdftitle={Social Media Ingestion for the Global Flood Event Data Pipeline}
+}
+
+\definecolor{codebg}{rgb}{0.97,0.97,0.97}
+\definecolor{codecomment}{rgb}{0.35,0.35,0.35}
+\definecolor{codekw}{rgb}{0.10,0.30,0.60}
+
+\lstset{
+    backgroundcolor=\color{codebg},
+    basicstyle=\ttfamily\footnotesize,
+    breaklines=true,
+    columns=fullflexible,
+    frame=single,
+    framerule=0pt,
+    keywordstyle=\color{codekw},
+    commentstyle=\color{codecomment},
+    showstringspaces=false,
+    xleftmargin=8pt,
+    xrightmargin=8pt,
+    aboveskip=8pt,
+    belowskip=8pt
+}
+
+\title{Social Media Ingestion for the Global Flood Event Data Pipeline\\
+       \large A technical report on design, integration, and production cutover}
+\author{Mohammed Chadli}
+\date{May 2026}
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+This report documents how I added a complete social media evidence layer to
+my Global Flood Event Data Pipeline. The goal was not to invent new flood
+events from public posts, but to add a corroborating signal on top of the
+existing authoritative sources (Dartmouth FO, GloFAS, Copernicus EMS,
+EM-DAT, ReliefWeb). I built the pipeline locally over twelve incremental
+steps, hit a 401/403 wall during the production cutover, debugged it down
+to the wrong Bluesky host being used for authenticated reads, fixed it,
+then spent two further iterations tightening the filtering and adding
+text-based country extraction. The system is now live against Supabase:
+50~real posts ingested through the authenticated Bluesky PDS,
+46~normalised staging signals after the self-healing transformer dropped
+4~political metaphors, 61\% of those signals carry an inferred country,
+average signal confidence 0.77, and all eight social data-quality checks
+pass with zero failing rows. The full implementation is covered by
+138~automated tests.
+\end{abstract}
+
+\tableofcontents
+
+\section{Motivation and Design Principles}
+
+The pipeline already ingests authoritative flood records from five
+official sources. Public social media data is qualitatively different: it
+is timely, geographically broad, and very noisy. I wanted it in the
+pipeline as an early-warning evidence layer, but never as truth on its
+own.
+
+Three principles shaped every decision:
+
+\begin{enumerate}[leftmargin=*]
+  \item \textbf{Social posts are evidence, not events.} A single post can
+        never enter \texttt{staging.flood\_events}. Social signals live in
+        their own staging table and are joined to events only inside a
+        dedicated mart that downstream consumers can opt into.
+  \item \textbf{Raw payloads are preserved verbatim.} Whatever the API
+        returns is stored as JSONB, with the same audit columns
+        (\texttt{source}, \texttt{batch\_id}, \texttt{ingested\_at},
+        \texttt{file\_path}) used by every other ingestion module. The
+        whole pipeline is therefore re-runnable from raw without going
+        back to Bluesky.
+  \item \textbf{Filtering must stay explainable.} Every rejection or
+        admission decision is recorded inline on the row so an analyst can
+        ask ``why was this post kept?'' or ``why was this one dropped?''
+        without having to re-run the classifier.
+\end{enumerate}
+
+The end-to-end shape is:
+
+\begin{lstlisting}
+Bluesky search (authenticated PDS, public AppView fallback)
+   |
+   v
+raw.social_media_posts
+   |
+   v
+staging.social_flood_signals  (normalized + scored)
+   |
+   v
+marts.social_flood_signals
+marts.flood_events_with_social_signals
+marts.social_signals_by_country_day
+   |
+   v
+FastAPI endpoints
+   |
+   v
+Airflow orchestration + data-quality report
+\end{lstlisting}
+
+\section{Choice of Platform}
+
+I evaluated four candidates (Twitter/X, Reddit, Mastodon, Bluesky) and
+picked Bluesky as the first integration. The reasoning:
+
+\begin{itemize}[leftmargin=*]
+  \item \textbf{Open AT Protocol.} The
+        \texttt{app.bsky.feed.searchPosts} lexicon is documented, stable,
+        and reachable from a plain HTTPS GET. No proprietary SDK needed.
+  \item \textbf{Two access tiers.} An unauthenticated AppView at
+        \texttt{public.api.bsky.app} for development and a fully
+        authenticated PDS at \texttt{bsky.social}. The two-tier design
+        meant I could prototype without credentials and switch to authed
+        access in production with the same code path.
+  \item \textbf{App passwords.} A separate credential type (App Password)
+        designed for third-party clients, revocable independently of the
+        account password. The pipeline never needs my real password.
+  \item \textbf{Bounded search.} A simple keyword search endpoint with a
+        \texttt{limit} parameter (capped at~100) and ISO~timestamp
+        \texttt{since}/\texttt{until} filters. That maps cleanly onto a
+        bounded Airflow task, no firehose state machine needed.
+  \item \textbf{Topical fit.} Real weather services (NWS regional
+        accounts, civil-protection accounts in Europe) already post
+        flood advisories there. The first 50 real posts I ingested
+        contained NWS Anchorage flood advisories and Spanish
+        \emph{Aemet} warnings.
+\end{itemize}
+
+Mastodon, Reddit, and X/Twitter are kept on the roadmap behind a single
+platform-agnostic \texttt{raw.social\_media\_posts} table so adding any
+of them is a new ingester plus a normalizer, not a schema change.
+
+\section{Data Contract and Schema}
+
+The schema lives in \texttt{db/schema.sql}. Two new tables were added.
+
+\subsection{\texttt{raw.social\_media\_posts}}
+
+I deliberately picked one unified raw table over per-platform tables. A
+\texttt{(platform, post\_id)} composite unique constraint guarantees
+idempotency across reruns.
+
+\begin{lstlisting}[language=SQL]
+CREATE TABLE IF NOT EXISTS raw.social_media_posts (
+    id              BIGSERIAL PRIMARY KEY,
+    platform        TEXT NOT NULL,
+    source          TEXT NOT NULL,
+    source_url      TEXT,
+    post_id         TEXT NOT NULL,
+    file_path       TEXT,
+    batch_id        TEXT NOT NULL,
+    ingested_at     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    payload         JSONB NOT NULL,
+    CONSTRAINT uq_social_media_posts_platform_post
+        UNIQUE (platform, post_id)
+);
+\end{lstlisting}
+
+\subsection{\texttt{staging.social\_flood\_signals}}
+
+The naming choice was intentional. I call the rows ``signals'' rather
+than ``events'' so nobody downstream confuses them with confirmed
+flooding.
+
+\begin{lstlisting}[language=SQL]
+CREATE TABLE IF NOT EXISTS staging.social_flood_signals (
+    id                      BIGSERIAL PRIMARY KEY,
+    platform                TEXT NOT NULL,
+    post_id                 TEXT NOT NULL,
+    source_event_id         TEXT,
+    created_at              TIMESTAMPTZ NOT NULL,
+    ingested_at             TIMESTAMPTZ,
+    text                    TEXT,
+    language                TEXT,
+    url                     TEXT,
+    author_id_hash          TEXT,
+    matched_keywords        TEXT[],
+    excluded_keywords       TEXT[],
+    flood_relevance_score   DOUBLE PRECISION,
+    location_confidence     DOUBLE PRECISION,
+    signal_confidence       DOUBLE PRECISION,
+    place_name              TEXT,
+    country                 TEXT,
+    latitude                DOUBLE PRECISION,
+    longitude               DOUBLE PRECISION,
+    geometry                GEOMETRY(Point, 4326),
+    h3_index                TEXT,
+    raw_payload             JSONB,
+    loaded_at               TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    CONSTRAINT uq_social_flood_signals_platform_post
+        UNIQUE (platform, post_id)
+);
+\end{lstlisting}
+
+The schema migration is idempotent: every column is wrapped in
+\texttt{ALTER TABLE \ldots\ ADD COLUMN IF NOT EXISTS}, and the unique
+constraints are added inside a \texttt{DO} block that checks
+\texttt{pg\_constraint} first. This was important because the
+authoritative pipeline was already in production; I had to make sure my
+schema deltas would apply cleanly to an existing Supabase instance, not
+just to a fresh database.
+
+I also added six task-specific indexes
+(\texttt{platform}, \texttt{created\_at}, \texttt{country},
+\texttt{h3\_index}, \texttt{signal\_confidence}, and a GIST index on
+\texttt{geometry}) so the dashboard queries stay fast as the table grows.
+
+\section{Ingestion: \texttt{ingestion/ingest\_bluesky.py}}
+
+\subsection{Authentication Flow}
+
+The single most important architectural detail of the ingester is which
+host it talks to:
+
+\begin{lstlisting}
+PUBLIC_SEARCH_URL = "https://public.api.bsky.app/xrpc/app.bsky.feed.searchPosts"
+AUTHED_SEARCH_URL = "https://bsky.social/xrpc/app.bsky.feed.searchPosts"
+AUTH_URL          = "https://bsky.social/xrpc/com.atproto.server.createSession"
+\end{lstlisting}
+
+The choice is made on every request by a tiny helper:
+
+\begin{lstlisting}
+def _search_url(headers):
+    return AUTHED_SEARCH_URL if headers else PUBLIC_SEARCH_URL
+\end{lstlisting}
+
+When \texttt{BLUESKY\_HANDLE} and \texttt{BLUESKY\_APP\_PASSWORD} are
+configured, \texttt{\_auth\_headers()} calls
+\texttt{com.atproto.server.createSession}, caches the returned
+\texttt{accessJwt} in a process-level variable, and returns the
+\texttt{Authorization: Bearer \ldots} header. The fetch helper then sends
+the request to \texttt{bsky.social} instead of
+\texttt{public.api.bsky.app}, because the public AppView does not accept
+Bearer tokens.
+
+\subsection{JWT Expiry Handling}
+
+Access JWTs from Bluesky live roughly two hours. For a daily Airflow
+schedule that is fine, but a long-running interactive session or a
+backfill can outlive the token. Rather than refreshing eagerly on a
+timer, I handle expiry reactively:
+
+\begin{enumerate}[leftmargin=*]
+  \item Send the search request with the cached JWT.
+  \item If the response is 401 or 403 \emph{and} we were authenticated,
+        clear the cached token, call \texttt{createSession} again, retry
+        the request once.
+  \item If the second attempt still fails with 401/403, raise an
+        \texttt{HTTPError} whose message tells the operator exactly which
+        environment variables to set.
+\end{enumerate}
+
+This keeps the happy path one HTTP call long, never refreshes
+unnecessarily, and recovers from token expiry without operator
+intervention.
+
+\subsection{Bounded Search Window}
+
+I added \texttt{BLUESKY\_LOOKBACK\_HOURS} to bound scheduled runs. When
+set, \texttt{fetch\_posts} translates it into the \texttt{since}
+timestamp Bluesky expects (RFC~3339 with a trailing~\texttt{Z}). An
+explicit caller-supplied \texttt{since} always wins. The default in
+production is~24 hours.
+
+The reason is operational: without a bound, every Airflow run would
+re-fetch the full~24-hour window plus everything older, and the de-dup
+on \texttt{(platform, post\_id)} would silently make every run look
+identical in cost. With the lookback, each run only pays for posts it
+hasn't seen.
+
+\subsection{Filtering Strategy}
+
+A keyword-only filter is far too noisy. The classifier has four signal
+groups feeding one decision:
+
+\begin{itemize}[leftmargin=*]
+  \item \textbf{Keywords} (\texttt{DEFAULT\_KEYWORDS}): trilingual
+        English/French/Arabic flood vocabulary, both weak forms
+        (``flood'', ``flooding'') and strong phrases (``flash flood'',
+        ``levee breach'', \emph{inondation}, \emph{crue},
+        \emph{fayadanat}). 30~entries.
+  \item \textbf{Strong terms} (\texttt{STRONG\_FLOOD\_TERMS}): phrases
+        unambiguous enough to admit a post on their own, without needing
+        extra context.
+  \item \textbf{Context terms} (\texttt{DEFAULT\_CONTEXT\_TERMS}):
+        disaster vocabulary (``rain'', ``storm'', ``rescue'',
+        ``evacuation'', ``levee'', ``road'', ``bridge'') in three
+        languages. A weak keyword needs at least one of these to be
+        admitted; otherwise the post is discarded.
+  \item \textbf{Exclusions} (\texttt{DEFAULT\_EXCLUDED\_PHRASES} plus a
+        compiled regex): obviously metaphorical phrases like ``flood my
+        inbox'', ``flood of emails'', and a regex covering the
+        ``flood~[the]~\textit{institution}'' political-protest family.
+\end{itemize}
+
+A post is kept only if:
+
+\begin{lstlisting}
+matched(any keyword)
+AND NOT matched(any exclusion)
+AND (matched(any strong term)
+      OR matched(any context term)
+      OR contains #flood or #flooding)
+\end{lstlisting}
+
+Every kept post records its \texttt{matched\_keywords},
+\texttt{matched\_context\_terms}, \texttt{matched\_strong\_terms},
+\texttt{excluded\_keywords}, \texttt{filter\_score},
+\texttt{filter\_reason}, and a \texttt{source\_confidence} of~0.6 (the
+post came from a public API with a stable identifier; that does not
+make the claim true). All of this lives on the raw row so the
+transformer never has to re-classify.
+
+\subsection{Snapshot and Audit Trail}
+
+Every run writes a JSON snapshot of the records it kept under
+\texttt{data/raw/social\_media/bluesky/}, computes a SHA-256 of the
+file, and writes one row into \texttt{raw.ingestion\_log} with the batch
+id, status, row count, source URL actually used (authed or public),
+file checksum, and timing. This mirrors what the five existing
+ingestion modules do and lets me audit production runs against the
+historical record.
+
+\section{Transformation: \texttt{transformations/transform.py}}
+
+\subsection{Normalization}
+
+Each raw payload becomes one row in \texttt{staging.social\_flood\_signals}
+via \texttt{\_normalize\_social\_media\_posts}. The function:
+
+\begin{enumerate}[leftmargin=*]
+  \item Pulls the post id, platform, created-at, text, language, URL,
+        and author hash off the raw payload.
+  \item Merges upstream exclusion markers with a fresh evaluation
+        against the current rules (see self-healing below).
+  \item Fills \texttt{country} and \texttt{place\_name} from text when
+        the ingester didn't supply them (see geo extraction below).
+  \item Computes three scores: flood relevance, location confidence,
+        and the final signal confidence.
+  \item Generates an H3 index if the row carries coordinates.
+\end{enumerate}
+
+\subsection{Scoring}
+
+Three independent components feed one final score.
+
+\paragraph{Flood relevance.} Uses the upstream \texttt{filter\_score}
+as the base, then adds bonuses for additional matched keywords, context
+terms, strong-term presence, and a small disaster-vocabulary check on
+the text itself. If any current exclusion fires, relevance collapses
+to~0.
+
+\paragraph{Location confidence.} A simple five-tier function. I
+deliberately kept the rule deterministic and short:
+
+\begin{itemize}[leftmargin=*]
+  \item~1.00 ---~latitude and longitude both present.
+  \item~0.75 ---~place name and country both present.
+  \item~0.50 ---~country only.
+  \item~0.35 ---~place name only.
+  \item~0.00 ---~no geographic clue.
+\end{itemize}
+
+\paragraph{Signal confidence.} A weighted combination:
+
+\begin{lstlisting}
+signal_confidence =
+      0.50 * relevance
+    + 0.25 * location_confidence
+    + 0.15 * source_confidence
+    + 0.10 * timestamp_score
+\end{lstlisting}
+
+clamped to~[0,~1]. Posts that fail relevance get a hard zero
+regardless of the other components.
+
+\subsection{Self-Healing Filter Re-Evaluation}
+
+This is the design choice I'm most pleased with. When the transformer
+normalises a raw row, it re-runs the \emph{current} exclusion rules
+against the text. If a phrase matches now that didn't when the row was
+first ingested, the row is flagged with the fresh exclusion. Then the
+upsert helper:
+
+\begin{itemize}[leftmargin=*]
+  \item \texttt{INSERT \ldots\ ON CONFLICT DO UPDATE}s the valid signals.
+  \item \texttt{DELETE}s any \texttt{(platform, post\_id)} whose
+        \texttt{excluded\_keywords} just became non-empty.
+\end{itemize}
+
+The net effect: tightening the filter is a code change plus a
+re-transform. No manual SQL surgery, no orphan rows lingering in
+staging. The raw row stays in place, which is what I want for the
+audit trail.
+
+\subsection{Country and Place-Name Extraction}
+
+The ingester sets \texttt{country} and \texttt{place\_name} to
+\texttt{None} because Bluesky posts almost never carry structured place
+metadata. To bring location coverage above zero I wrote a small
+self-contained extractor at \texttt{transformations/social\_geo.py}.
+
+The extractor runs five precision-first strategies, returning on the
+first hit:
+
+\begin{enumerate}[leftmargin=*]
+  \item \textbf{Country adjective} (``French floods'' ->~France).
+        70~adjectives, sorted longest-first so ``Sri Lankan'' beats
+        ``Lankan''.
+  \item \textbf{Explicit country name} (``\ldots across Spain
+        \ldots'' ->~Spain). About~110~countries, expressed as compiled
+        case-insensitive regexes so ``UK'', ``U.K.'', ``United Kingdom''
+        all map to one canonical form.
+  \item \textbf{\texttt{<City>, <ST>} pattern} ->~United States with a
+        full \texttt{place\_name} like ``Baton Rouge, Louisiana''. The
+        city group is a title-cased 1--4-word sequence, the state group
+        is a two-letter all-caps code from a closed list of the
+        50~states plus DC.
+  \item \textbf{Full US state name} ->~United States with the state
+        name as \texttt{place\_name}.
+  \item \textbf{US timezone abbreviation} (\texttt{AKDT},
+        \texttt{EDT}, \ldots) ->~United States. Specifically targets
+        NWS weather alerts which routinely embed the local timezone
+        code.
+\end{enumerate}
+
+The module is zero-dependency (only \texttt{re}) and never overwrites a
+value the ingester already supplied. If a future Mastodon ingester
+delivers a structured place field, the extractor stays out of the way.
+
+The whole module is under~300~lines, runs in microseconds, and is
+covered by 28~tests anchored on real Bluesky samples I observed during
+the cutover. The negative tests are as important as the positive
+ones~---~``OR'' as an English conjunction must not be misread as
+Oregon, and a political metaphor must not produce a misleading country.
+
+\section{Marts}
+
+Three views are rebuilt by \texttt{transformations/marts.py} on every
+DAG run. The views are dropped and recreated rather than refreshed
+in place because PostgreSQL's \texttt{CREATE OR REPLACE VIEW} only
+succeeds if the column list is byte-identical, and I wanted to be able
+to evolve them without manual migrations.
+
+\subsection{\texttt{marts.social\_flood\_signals}}
+
+A flat projection over staging with the geometry rendered as GeoJSON
+for the FastAPI layer.
+
+\subsection{\texttt{marts.flood\_events\_with\_social\_signals}}
+
+A LEFT JOIN of the deduplicated event view onto staging signals,
+aggregated per event. A signal corroborates an event if its
+\texttt{created\_at} falls inside [\texttt{date\_start - 1 day},
+\texttt{date\_end + 3 days}] and either the H3 cells match or the
+country names match case-insensitively. The output adds
+\texttt{social\_signal\_count},
+\texttt{first\_social\_signal\_at},
+\texttt{latest\_social\_signal\_at},
+\texttt{avg\_social\_signal\_confidence}, and a deduplicated
+\texttt{social\_platforms} array.
+
+\subsection{\texttt{marts.social\_signals\_by\_country\_day}}
+
+A daily, per-country rollup designed for monitoring dashboards. Each
+row has the signal count, the average confidence, the count of
+high-confidence (\texttt{>= 0.5}) signals, the set of platforms, and
+the set of languages. \texttt{country = NULL} is mapped to the literal
+string \texttt{'unknown'} so the consumer never has to handle
+\texttt{NULL} grouping behavior. This is the view I expect to wire
+into the next dashboard iteration.
+
+\section{API: \texttt{api/main.py}}
+
+The existing FastAPI service was extended with four social endpoints,
+each of which guards its mart with a \texttt{503} if the view does not
+yet exist (so the API is honest about pipeline state rather than
+returning misleading empty arrays):
+
+\begin{itemize}[leftmargin=*]
+  \item \texttt{GET /social-signals} ---~paginated signal feed with
+        \texttt{platform}, \texttt{country}, and
+        \texttt{min\_confidence} filters.
+  \item \texttt{GET /flood-events/with-social-signals} ---~events
+        enriched with corroborating signal counts; filterable by
+        country and \texttt{min\_social\_signals}.
+  \item \texttt{GET /analytics/social-signals/by-platform} ---~one row
+        per platform with totals and average confidence.
+  \item \texttt{GET /analytics/social-signals/by-country-day} ---~the
+        country/day rollup with optional country, start/end date, and
+        confidence-floor filters.
+\end{itemize}
+
+\section{Orchestration: \texttt{dags/flood\_event\_pipeline\_dag.py}}
+
+The Airflow DAG was extended with one new task. The wiring keeps
+social ingestion parallel with the five authoritative ingestions:
+
+\begin{lstlisting}
+apply_schema
+  -> validate_endpoints
+       -> ingest_dartmouth ------+
+       -> ingest_glofas ---------+
+       -> ingest_copernicus_ems -+--> transform_raw_to_staging
+       -> ingest_emdat ---------+        -> refresh_marts
+       -> ingest_reliefweb ----+              -> dbt_run
+       -> ingest_bluesky ----+                      -> data_quality
+\end{lstlisting}
+
+\texttt{ingest\_bluesky} is no-op unless
+\texttt{ENABLE\_SOCIAL\_MEDIA\_INGESTION} is truthy in the environment,
+so toggling social on or off is a single env-var change with no DAG
+edits. The \texttt{data\_quality} task uses \texttt{trigger\_rule =
+all\_done} so an upstream ingestion failure never silences the report.
+
+\section{Data Quality}
+
+\texttt{validation/data\_quality.py} runs eight social-signal checks
+alongside the existing flood-event checks. Every check is a simple
+\texttt{SELECT COUNT(*) AS bad FROM \ldots} returning the number of
+failing rows; the report renders them as a Markdown table at
+\texttt{data/logs/data\_quality\_report.md}.
+
+\begin{itemize}[leftmargin=*]
+  \item \texttt{social\_duplicate\_platform\_post\_ids}
+  \item \texttt{social\_missing\_created\_at}
+  \item \texttt{social\_missing\_platform\_or\_post\_id}
+  \item \texttt{social\_invalid\_latitude\_or\_longitude}
+  \item \texttt{social\_missing\_h3\_with\_coords}
+  \item \texttt{social\_confidence\_out\_of\_range}
+  \item \texttt{social\_relevance\_without\_keywords}
+        \emph{(integrity: future refactor must not let a row land in
+        staging without keywords)}
+  \item \texttt{social\_orphan\_staging\_signals}
+        \emph{(traceability: every staging row must still point at an
+        existing raw row)}
+\end{itemize}
+
+The report also includes a per-platform summary table mirroring the
+per-source table for authoritative events.
+
+\section{Problems Faced and How I Solved Them}
+
+\subsection{The 401/403 Wall on Production Cutover}
+
+\textbf{Symptom.} Local tests all green, schema applied to Supabase,
+ingester refused to fetch anything: every call returned~401 or~403.
+Filling \texttt{BLUESKY\_HANDLE} and \texttt{BLUESKY\_APP\_PASSWORD} in
+\texttt{.env} did not change a thing.
+
+\textbf{Root cause.} The ingester was hard-coded to
+\texttt{public.api.bsky.app}, Bluesky's \emph{unauthenticated} AppView.
+That host does not accept Bearer tokens. Sending one is at best
+ignored and at worst rejected as malformed. So the credentials I had
+configured were being silently dropped before the request even left my
+machine.
+
+\textbf{Fix.} I separated the two hosts into two named constants and
+introduced \texttt{\_search\_url(headers)}, which picks the right host
+based on whether the request carries auth headers. Authenticated calls
+now go to \texttt{bsky.social/xrpc/app.bsky.feed.searchPosts}~---~the
+PDS, which proxies authenticated reads to the AppView and accepts the
+JWT returned by \texttt{createSession}. I also widened the error
+message so a future operator sees the actionable
+``set \texttt{BLUESKY\_HANDLE} and \texttt{BLUESKY\_APP\_PASSWORD}''
+hint instead of a generic ``HTTP~401''.
+
+\textbf{Aftermath.} The \texttt{raw.ingestion\_log} still carries the
+historical failure row with \texttt{source\_url} pointing at the public
+AppView. I kept it deliberately as evidence that the fix was effective:
+every subsequent row records \texttt{bsky.social} as the actual host.
+
+\subsection{The Leading @ on \texttt{BLUESKY\_HANDLE}}
+
+\textbf{Symptom.} After fixing the host issue, my next attempt still
+failed. The \texttt{createSession} call returned HTTP~400 with no
+\texttt{accessJwt}.
+
+\textbf{Root cause.} The Bluesky web UI displays handles with a leading
+\texttt{@} (``\texttt{@user.bsky.social}''). I copied mine verbatim into
+\texttt{.env}. The XRPC endpoint expects the bare handle and rejects
+the \texttt{@}-prefixed form as malformed input.
+
+\textbf{Fix.} \texttt{\_bluesky\_credentials()} now strips a leading
+\texttt{@} and trims surrounding whitespace before returning the
+identifier. I covered both the normalization and the
+``\texttt{@}-only handle'' degenerate case with tests. The next operator
+who copies a handle out of the UI never has to debug this again.
+
+\subsection{Pytest \texttt{tmp\_path} on Windows}
+
+\textbf{Symptom.} \texttt{pytest} refused to run on my Windows machine
+with \texttt{PermissionError: [WinError 5] Access is denied} on
+\texttt{C:\textbackslash{}Users\textbackslash{}\ldots\textbackslash{}Temp\textbackslash{}pytest-of-\ldots}.
+
+\textbf{Root cause.} An old \texttt{pytest-of-\ldots} directory left by
+a different Windows user had locked permissions; pytest could neither
+delete nor reuse it.
+
+\textbf{Fix.} I run the suite with an explicit, writable
+\texttt{--basetemp=C:\textbackslash{}Temp\textbackslash{}pytest\_flood}
+and \texttt{-p no:cacheprovider} to bypass the \texttt{.pytest\_cache}
+folder my IDE had also locked. This is a workspace-specific
+workaround, not a code change.
+
+\subsection{Filter Admitting Political Metaphors}
+
+\textbf{Symptom.} The first 50 production rows looked good on first
+glance, but a manual inspection of the lowest-confidence signals showed
+several political-protest tweets: ``we have to flood Congress'', ``flood
+the zone with shit'', ``We should be flooding the streets''.
+
+\textbf{Root cause.} The old exclusion list covered the obvious
+metaphors (``flood my inbox'') but not the political-action family. The
+word ``Congress'' and ``streets'' are not in the disaster-context list
+but neither was anything else strong enough to block them, and the
+weak keyword ``flood'' was enough to admit them when paired with the
+generic alert vocabulary the same posts often carried.
+
+\textbf{Fix.} I added fourteen new literal exclusion phrases plus a
+compiled regex that matches the family generically:
+
+\begin{lstlisting}
+flood(?:ing|ed)? \s+ (?:the\s+|up\s+the\s+)?
+   (?: zone | portal | inbox | congress | senate |
+       white\s+house | polls? | courts? | streets? |
+       airwaves | system | government | hill | capitol |
+       comments? | timeline | mentions? | feed |
+       chat | chats | dms? | replies? )
+\end{lstlisting}
+
+When the regex fires, \texttt{\_excluded\_keywords} records a synthetic
+\texttt{political\_metaphor:flood\_the\_<institution>} marker on the
+row, so the audit trail explains exactly which rule rejected the post.
+
+To make the fix retroactive without touching production by hand, the
+transformer re-evaluates the live exclusion rules at every transform
+pass (see the self-healing design earlier). Running the transformer
+once after the change dropped four political metaphors out of the
+existing~50 staging rows automatically.
+
+\subsection{One Hundred Percent of Signals Tagged \texttt{country = NULL}}
+
+\textbf{Symptom.} The new \texttt{marts.social\_signals\_by\_country\_day}
+view collapsed all~50 production signals into a single
+\texttt{country = 'unknown'} bucket, which made it useless for
+monitoring.
+
+\textbf{Root cause.} Bluesky posts almost never carry structured place
+fields, so the ingester always sets \texttt{country} and
+\texttt{place\_name} to \texttt{None}.
+
+\textbf{Fix.} The new \texttt{transformations/social\_geo.py} extractor
+described earlier. The change is fully backward-compatible: it only
+runs when \texttt{country} or \texttt{place\_name} is missing, and it
+returns \texttt{None} when no strategy is confident. After
+re-transforming the same~50 raw rows, country coverage went from~0\%
+to~61\% and place-name coverage from~0\% to~50\%, with the United
+States, Spain, Pakistan, and Turkey appearing as distinct buckets in
+the country/day mart.
+
+\subsection{Local Python Environment Without \texttt{h3}}
+
+\textbf{Symptom.} Trying to install the project's full dependency set
+into a single local Python environment failed: \texttt{h3} requires a
+C~toolchain on Windows that isn't installed, and \texttt{pandas}
+attempted to build from source for a Python version with no prebuilt
+wheel.
+
+\textbf{Fix.} Production code imports \texttt{h3} normally and falls
+back to \texttt{None} only if the import fails. The transformer logs
+a warning and leaves \texttt{h3\_index} \texttt{NULL} when the package
+is missing, so the pipeline keeps producing valid staging rows in
+locally-degraded environments. The test suite includes a tiny H3 shim
+that activates only when the real package is unavailable, so the
+transformation tests still exercise the \texttt{h3\_index} code path.
+Production Airflow runs inside the Docker image where the real
+\texttt{h3} package is baked in.
+
+\subsection{Friend's Supabase Project Visibility}
+
+\textbf{Symptom.} The data pipeline writes succeeded but the project
+owner couldn't see the new tables in their own Supabase dashboard.
+
+\textbf{Root cause.} The \texttt{DATABASE\_URL} in \texttt{.env}
+points to a Supabase project owned by a different account
+(\texttt{project\_ref = grakjgjmuusbrbjlgvgg}). Logging into Supabase
+with a different account doesn't show that project.
+
+\textbf{Fix.} Documented the project reference and the dashboard URL
+in the verification script and the runbook so the next operator either
+asks the project owner for a Team invite or signs in with the owning
+account.
+
+\subsection{PowerShell Quote Mangling in One-Liner Verification}
+
+\textbf{Symptom.} A throwaway \texttt{python -c "\ldots"} command for
+inspecting the database failed with \texttt{SyntaxError: unterminated
+string literal} because PowerShell pre-processed the embedded SQL
+string.
+
+\textbf{Fix.} Moved verification SQL into a small dedicated script
+(\texttt{scripts/\_verify\_social\_cutover.py}) that I can re-run as a
+single command. It also doubles as a sanity-check tool for the next
+deploy.
+
+\section{Live Production Results}
+
+After all fourteen steps, against the real Supabase project, on a
+72-hour Bluesky lookback window with bounded sizes
+(\texttt{max\_posts=50}, \texttt{per\_query\_limit=25}):
+
+\begin{center}
+\small
+\begin{tabular}{lrr}
+\toprule
+Metric & After cutover only & After filter + geo \\
+\midrule
+Raw rows ingested                & 50    & 50    \\
+Staging signals                  & 50    & 46    \\
+Average \texttt{signal\_confidence}     & 0.651 & 0.766 \\
+Rows with \texttt{country}              & 0     & 28    \\
+Rows with \texttt{place\_name}          & 0     & 23    \\
+Distinct countries in staging    & 1     & 5     \\
+Failing social DQ checks         & 0 / 8 & 0 / 8 \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+Cross-source corroboration is not yet a measurable signal because the
+first 50 social rows fell outside the time/H3/country windows of every
+authoritative event currently in \texttt{staging.flood\_events}.
+That is expected at the scale of a single small ingestion run; it will
+become measurable once daily Airflow runs accumulate hundreds of
+signals per week.
+
+\section{Testing}
+
+138 automated tests cover the social pipeline, organised as:
+
+\begin{itemize}[leftmargin=*]
+  \item \texttt{tests/test\_ingest\_bluesky.py} (29 tests)~---~public
+        vs.\ authed host selection, JWT-refresh retry, lookback window,
+        explicit-\texttt{since} override, credential normalization
+        (including the leading-\texttt{@} case),
+        political-metaphor exclusion (8~parametrized rejects,
+        4~parametrized keeps), regex sanity, snapshot writing,
+        ingestion-log success and failure paths.
+  \item \texttt{tests/test\_transform.py} (52 tests)~---~scalar
+        coercers, per-source normalisers for the five authoritative
+        sources, social normaliser including the new geo enrichment
+        and the don't-overwrite invariant, self-healing exclusion
+        re-evaluation, upsert filtering and the DELETE pass for newly
+        excluded rows.
+  \item \texttt{tests/test\_social\_geo.py} (28~tests)~---~real-sample
+        regression cases, country adjectives, country names,
+        \texttt{<City>, <ST>} patterns, full state names, US timezone
+        codes, plus negative cases for empty input, ambiguous
+        two-letter words, and political metaphors that must not
+        produce country tags.
+  \item \texttt{tests/test\_db\_client.py} (16~tests)~---~including
+        the social insert helper, NaN/Inf cleaning, idempotent
+        upserting, transient-pooler-drop retry.
+  \item \texttt{tests/test\_ingestion\_common.py}
+        (10~tests)~---~shared helpers used by every ingester.
+\end{itemize}
+
+The suite runs in roughly one second on my machine. None of these
+tests touch the network or the live database; all external dependencies
+are mocked.
+
+\section{Future Enhancements}
+
+These are the changes I'd prioritise next, in rough order of value per
+effort.
+
+\begin{enumerate}[leftmargin=*]
+  \item \textbf{Offline gazetteer for non-US cities.} The current geo
+        extractor is precision-first and recognises explicit country
+        mentions plus US states and timezones. Names of major cities
+        outside the US (Lagos, Karachi, Manila, S\~ao Paulo) are still
+        invisible to it. A small static gazetteer (e.g.\ GeoNames
+        \texttt{cities500} restricted to >\,1\,M population) would lift
+        recall without bringing in a heavyweight NLP dependency.
+  \item \textbf{Cross-platform corroboration.} Add a second platform
+        (Mastodon search is the easiest because of its public API and
+        absence of strict rate limits). Strong corroboration should
+        require independent signals from at least two platforms, not
+        just multiple posts on Bluesky.
+  \item \textbf{Social-incident clustering.} Group signals by
+        country / H3 / time window into candidate incidents and
+        compute a cluster confidence score that rewards quantity,
+        independence (distinct authors), and source diversity.
+  \item \textbf{Alerting hook.} When
+        \texttt{marts.social\_signals\_by\_country\_day.high\_confidence\_count}
+        crosses a threshold for a country with no recent matching
+        event in \texttt{marts.flood\_events\_unique}, fire a
+        notification. This is the operational reason the country/day
+        mart exists in the first place.
+  \item \textbf{Bounded AT~Protocol firehose.} If \texttt{searchPosts}
+        coverage proves insufficient for early-warning, the natural
+        next step is a bounded firehose client with a strict
+        budget~---~not a long-running daemon, but a windowed reader
+        that runs alongside the search-based ingester.
+  \item \textbf{Dashboard panel.} Surface the new country/day rollup
+        and the per-event signal corroboration in the dashboard so the
+        evidence layer is visible alongside authoritative events.
+\end{enumerate}
+
+\section{Conclusion}
+
+What began as a request to ``add social posts to the pipeline'' turned
+into a 14-step exercise in keeping a new evidence layer separate from
+authoritative data, handling Bluesky's two-tier authentication model
+correctly, building a filter that is both explainable and tightenable
+without producing orphan rows, and recovering geographic context from
+free text without either an external service or a heavy dependency.
+The system is now live, instrumented, tested, and operationally
+honest: every score and every rejection is justified by data on the
+row itself, every run is auditable through
+\texttt{raw.ingestion\_log}, and every dashboard query is answered by
+a mart that explicitly tells the API when it is not ready.
+
+\end{document}

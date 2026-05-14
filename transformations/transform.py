@@ -16,15 +16,21 @@ import json
 import logging
 import math
 import re
+from collections.abc import Iterable as IterableABC
 from datetime import datetime
 from typing import Any, Iterable
 
-import h3
 import pandas as pd
 from sqlalchemy import text
 
+try:
+    import h3
+except ModuleNotFoundError:  # pragma: no cover - depends on local environment
+    h3 = None
+
 from config.settings import H3_RESOLUTION
 from db.client import execute_with_retry, get_engine
+from transformations.social_geo import extract_location
 
 logger = logging.getLogger(__name__)
 
@@ -107,10 +113,27 @@ def _h3_for(lat: float | None, lon: float | None) -> str | None:
         return None
     if not (-90.0 <= lat <= 90.0) or not (-180.0 <= lon <= 180.0):
         return None
+    if h3 is None:
+        logger.warning("h3 package is not installed; h3_index will be NULL")
+        return None
     try:
         return h3.geo_to_h3(lat, lon, H3_RESOLUTION)
     except Exception:  # noqa: BLE001
         return None
+
+
+def _as_text_list(value: Any) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, str):
+        return [value] if value.strip() else []
+    if isinstance(value, IterableABC):
+        return [str(v).strip() for v in value if v is not None and str(v).strip()]
+    return []
+
+
+def _clamp_score(value: float) -> float:
+    return max(0.0, min(1.0, value))
 
 
 # ---------------------------------------------------------------------------
@@ -355,6 +378,172 @@ def _normalize_reliefweb(payloads: Iterable[dict]) -> list[dict]:
     return out
 
 
+def _current_exclusions(text: str) -> list[str]:
+    """Re-evaluate the current Bluesky exclusion rules against arbitrary text.
+
+    Used at the raw-to-staging step so tightening
+    `ingestion.ingest_bluesky.DEFAULT_EXCLUDED_PHRASES` (or the political
+    metaphor regex) retroactively drops already-ingested false positives on
+    the next transform. Imported lazily because the ingestion module imports
+    the requests library which we do not want pulled in for unrelated
+    transformer use.
+    """
+    if not text:
+        return []
+    try:
+        from ingestion.ingest_bluesky import _excluded_keywords as _ek
+    except Exception:  # noqa: BLE001
+        return []
+    try:
+        return _ek(text)
+    except Exception:  # noqa: BLE001
+        return []
+
+
+def _social_flood_relevance_score(payload: dict) -> float:
+    text = _clean_text(payload.get("text")) or ""
+    matched = _as_text_list(payload.get("matched_keywords"))
+    context_terms = _as_text_list(payload.get("matched_context_terms"))
+    strong_terms = _as_text_list(payload.get("matched_strong_terms"))
+    # Trust upstream exclusions AND re-check the text against the current
+    # exclusion rules so a tightened filter retroactively suppresses old
+    # raw rows on the next transform pass.
+    excluded = _as_text_list(payload.get("excluded_keywords")) + _current_exclusions(text)
+    if not text or not matched or excluded:
+        return 0.0
+    upstream_filter_score = _to_float(payload.get("filter_score"))
+    base = upstream_filter_score if upstream_filter_score is not None else 0.4
+    base += min(len(matched), 4) * 0.06
+    base += min(len(context_terms), 5) * 0.04
+    if strong_terms:
+        base += 0.12
+    disaster_terms = (
+        "evacuat",
+        "rescue",
+        "river",
+        "rain",
+        "storm",
+        "road",
+        "bridge",
+        "emergency",
+        "damage",
+        "inondation",
+        "crue",
+        "\u0633\u064a\u0648\u0644",
+        "\u0641\u064a\u0636\u0627\u0646",
+    )
+    folded = text.casefold()
+    if any(term in folded for term in disaster_terms):
+        base += 0.08
+    return _clamp_score(base)
+
+
+def _social_source_confidence(payload: dict) -> float:
+    """How much trust to assign to the collection channel itself.
+
+    This is not truth confirmation. It only says the record came from a public
+    platform API/search path and retained a stable post identifier.
+    """
+    explicit = _to_float(payload.get("source_confidence"))
+    if explicit is not None:
+        return _clamp_score(explicit)
+    if _clean_text(payload.get("platform")) and _clean_text(payload.get("post_id")):
+        return 0.6
+    return 0.3
+
+
+def _social_location_confidence(payload: dict) -> float:
+    lat = _to_float(payload.get("latitude"))
+    lon = _to_float(payload.get("longitude"))
+    if lat is not None and lon is not None:
+        return 1.0
+    if _clean_text(payload.get("place_name")) and _clean_text(payload.get("country")):
+        return 0.75
+    if _clean_text(payload.get("country")):
+        return 0.5
+    if _clean_text(payload.get("place_name")):
+        return 0.35
+    return 0.0
+
+
+def _social_signal_confidence(payload: dict) -> float:
+    relevance = _social_flood_relevance_score(payload)
+    if relevance <= 0:
+        return 0.0
+    location = _social_location_confidence(payload)
+    source = _social_source_confidence(payload)
+    recency = 1.0 if _parse_date(payload.get("created_at")) else 0.0
+    return _clamp_score(
+        (relevance * 0.5) + (location * 0.25) + (source * 0.15) + (recency * 0.1)
+    )
+
+
+def _normalize_social_media_posts(payloads: Iterable[dict]) -> list[dict]:
+    out: list[dict] = []
+    for p in payloads:
+        lat = _to_float(p.get("latitude"))
+        lon = _to_float(p.get("longitude"))
+        created_at = _parse_date(p.get("created_at"))
+        post_id = _clean_text(p.get("post_id"))
+        platform = _clean_text(p.get("platform"))
+        matched = _as_text_list(p.get("matched_keywords"))
+        # Merge upstream exclusions with current-rule exclusions so tightening
+        # the filter retroactively flags previously-ingested false positives.
+        text_for_check = _clean_text(p.get("text")) or ""
+        excluded = _as_text_list(p.get("excluded_keywords")) + _current_exclusions(text_for_check)
+        # De-duplicate while preserving order so the audit trail stays readable.
+        seen: set[str] = set()
+        excluded = [x for x in excluded if not (x in seen or seen.add(x))]
+        # Country and place_name are usually missing from Bluesky posts.
+        # Fill them in defensively from the post text, but never overwrite an
+        # explicit value that the ingester already carried through.
+        country = _clean_text(p.get("country"))
+        place_name = _clean_text(p.get("place_name"))
+        if not country or not place_name:
+            inferred = extract_location(text_for_check)
+            if not country:
+                country = inferred.get("country")
+            if not place_name:
+                place_name = inferred.get("place_name")
+        # Recompute location confidence after enrichment so the staging score
+        # rewards the newly-inferred country/place_name.
+        location_payload = {
+            **p,
+            "country": country,
+            "place_name": place_name,
+            "latitude": lat,
+            "longitude": lon,
+        }
+        relevance = _social_flood_relevance_score(p)
+        location_confidence = _social_location_confidence(location_payload)
+        signal_confidence = _social_signal_confidence(location_payload)
+        out.append(
+            {
+                "platform": platform,
+                "post_id": post_id,
+                "source_event_id": f"{platform}:{post_id}" if platform and post_id else None,
+                "created_at": created_at,
+                "ingested_at": _parse_date(p.get("ingested_at")),
+                "text": _clean_text(p.get("text")),
+                "language": _clean_text(p.get("language")),
+                "url": _clean_text(p.get("url")),
+                "author_id_hash": _clean_text(p.get("author_id_hash")),
+                "matched_keywords": matched,
+                "excluded_keywords": excluded,
+                "flood_relevance_score": relevance,
+                "location_confidence": location_confidence,
+                "signal_confidence": signal_confidence,
+                "place_name": place_name,
+                "country": country,
+                "latitude": lat,
+                "longitude": lon,
+                "h3_index": _h3_for(lat, lon),
+                "raw_payload": p.get("raw_payload") or p,
+            }
+        )
+    return out
+
+
 SOURCE_HANDLERS = {
     "dartmouth_events": _normalize_dartmouth,
     "glofas_events": _normalize_glofas,
@@ -411,6 +600,52 @@ UPSERT_SQL = text(
     """
 )
 
+SOCIAL_SIGNAL_UPSERT_SQL = text(
+    """
+    INSERT INTO staging.social_flood_signals (
+        platform, post_id, source_event_id, created_at, ingested_at,
+        text, language, url, author_id_hash,
+        matched_keywords, excluded_keywords,
+        flood_relevance_score, location_confidence, signal_confidence,
+        place_name, country, latitude, longitude, geometry, h3_index,
+        raw_payload, loaded_at
+    ) VALUES (
+        :platform, :post_id, :source_event_id, :created_at, :ingested_at,
+        :text, :language, :url, :author_id_hash,
+        :matched_keywords, :excluded_keywords,
+        :flood_relevance_score, :location_confidence, :signal_confidence,
+        :place_name, :country, :latitude, :longitude,
+        CASE
+            WHEN :latitude IS NOT NULL AND :longitude IS NOT NULL
+            THEN ST_SetSRID(ST_MakePoint(:longitude, :latitude), 4326)
+            ELSE NULL
+        END,
+        :h3_index, CAST(:raw_payload AS JSONB), NOW()
+    )
+    ON CONFLICT (platform, post_id) DO UPDATE SET
+        source_event_id       = EXCLUDED.source_event_id,
+        created_at            = EXCLUDED.created_at,
+        ingested_at           = EXCLUDED.ingested_at,
+        text                  = EXCLUDED.text,
+        language              = EXCLUDED.language,
+        url                   = EXCLUDED.url,
+        author_id_hash        = EXCLUDED.author_id_hash,
+        matched_keywords      = EXCLUDED.matched_keywords,
+        excluded_keywords     = EXCLUDED.excluded_keywords,
+        flood_relevance_score = EXCLUDED.flood_relevance_score,
+        location_confidence   = EXCLUDED.location_confidence,
+        signal_confidence     = EXCLUDED.signal_confidence,
+        place_name            = EXCLUDED.place_name,
+        country               = EXCLUDED.country,
+        latitude              = EXCLUDED.latitude,
+        longitude             = EXCLUDED.longitude,
+        geometry              = EXCLUDED.geometry,
+        h3_index              = EXCLUDED.h3_index,
+        raw_payload           = EXCLUDED.raw_payload,
+        loaded_at             = NOW();
+    """
+)
+
 
 def _upsert(rows: list[dict]) -> int:
     """Upsert normalized rows. Skips rows missing the required date_start."""
@@ -425,6 +660,65 @@ def _upsert(rows: list[dict]) -> int:
         slice_ = valid[i : i + chunk]
         execute_with_retry(UPSERT_SQL, slice_)
         inserted += len(slice_)
+    return inserted
+
+
+SOCIAL_SIGNAL_DELETE_SQL = text(
+    """
+    DELETE FROM staging.social_flood_signals
+    WHERE platform = :platform AND post_id = :post_id
+    """
+)
+
+
+def _upsert_social_signals(rows: list[dict]) -> int:
+    """Upsert normalized social flood signals, and proactively delete any
+    rows that previously made it into staging but now match a tightened
+    exclusion rule.
+
+    Without the delete pass, a row admitted under loose rules would linger in
+    ``staging.social_flood_signals`` forever after the filter is tightened.
+    The delete is keyed on ``(platform, post_id)`` and only fires for rows
+    that have non-empty ``excluded_keywords``, so it never touches signals
+    that simply failed an unrelated validity check.
+    """
+    valid = [
+        {
+            **r,
+            "raw_payload": json.dumps(r.get("raw_payload") or {}, default=str, allow_nan=False),
+        }
+        for r in rows
+        if r.get("platform")
+        and r.get("post_id")
+        and r.get("created_at")
+        and r.get("matched_keywords")
+        and not r.get("excluded_keywords")
+        and r.get("flood_relevance_score", 0) > 0
+        and r.get("signal_confidence", 0) > 0
+    ]
+    newly_excluded = [
+        {"platform": r["platform"], "post_id": r["post_id"]}
+        for r in rows
+        if r.get("platform")
+        and r.get("post_id")
+        and r.get("excluded_keywords")
+    ]
+    chunk = 50
+    inserted = 0
+    for i in range(0, len(valid), chunk):
+        slice_ = valid[i : i + chunk]
+        execute_with_retry(SOCIAL_SIGNAL_UPSERT_SQL, slice_)
+        inserted += len(slice_)
+    deleted = 0
+    if newly_excluded:
+        for i in range(0, len(newly_excluded), chunk):
+            slice_ = newly_excluded[i : i + chunk]
+            execute_with_retry(SOCIAL_SIGNAL_DELETE_SQL, slice_)
+            deleted += len(slice_)
+        logger.info(
+            "Removed %s newly-excluded rows from staging.social_flood_signals",
+            deleted,
+        )
     return inserted
 
 
@@ -447,6 +741,31 @@ def transform_source(table: str) -> int:
     return n
 
 
+def transform_social_media_posts() -> int:
+    """Transform raw social posts into staging.social_flood_signals."""
+    engine = get_engine()
+    with engine.connect() as conn:
+        result = conn.execute(
+            text("SELECT payload, ingested_at FROM raw.social_media_posts")
+        )
+        payloads = []
+        for row in result:
+            payload = _as_dict(row[0])
+            payload.setdefault("ingested_at", row[1])
+            payloads.append(payload)
+    if not payloads:
+        logger.info("raw.social_media_posts is empty - skipping")
+        return 0
+    rows = _normalize_social_media_posts(payloads)
+    n = _upsert_social_signals(rows)
+    logger.info(
+        "Transformed raw.social_media_posts -> staging.social_flood_signals: "
+        "%s rows upserted",
+        n,
+    )
+    return n
+
+
 def run_all() -> dict[str, int]:
     """Run the transformation for every source. Returns per-source counts."""
     results: dict[str, int] = {}
@@ -456,6 +775,11 @@ def run_all() -> dict[str, int]:
         except Exception:  # noqa: BLE001
             logger.exception("Transformation failed for raw.%s", table)
             results[table] = -1
+    try:
+        results["social_media_posts"] = transform_social_media_posts()
+    except Exception:  # noqa: BLE001
+        logger.exception("Transformation failed for raw.social_media_posts")
+        results["social_media_posts"] = -1
     return results
 
 

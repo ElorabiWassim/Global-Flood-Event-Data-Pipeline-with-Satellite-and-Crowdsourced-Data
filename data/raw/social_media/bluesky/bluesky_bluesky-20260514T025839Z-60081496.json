@@ -1,0 +1,116 @@
+[
+  {
+    "platform": "bluesky",
+    "post_id": "at://did:plc:4a7qekv3khxoadlaeavziztd/app.bsky.feed.post/3mlrsx6qa522c",
+    "created_at": "2026-05-14T02:55:23.900Z",
+    "indexed_at": "2026-05-14T02:55:24.166Z",
+    "text": "Wowwwwwww, there\u2019s dumb and then there\u2019s the folks for whom that page was written! But it looks like OEC is safe for the moment - they\u2019re far enough along on the flood mitigation project that it\u2019ll withstand a LOT more rain than it used to. \n\nwater.noaa.gov/gauges/elpm2",
+    "language": "en",
+    "url": "https://bsky.app/profile/nerienis.bsky.social/post/3mlrsx6qa522c",
+    "author_id_hash": "63a6e68b24a6f665a93c5e2afacda0924bf3c7a4988b663e094ebf34471f7fc6",
+    "place_name": null,
+    "country": null,
+    "latitude": null,
+    "longitude": null,
+    "matched_keywords": [
+      "flood"
+    ],
+    "matched_context_terms": [
+      "rain"
+    ],
+    "matched_strong_terms": [],
+    "excluded_keywords": [],
+    "filter_score": 0.5800000000000001,
+    "filter_reason": "flood_keyword_with_context",
+    "source_confidence": 0.6,
+    "raw_payload": {
+      "uri": "at://did:plc:4a7qekv3khxoadlaeavziztd/app.bsky.feed.post/3mlrsx6qa522c",
+      "cid": "bafyreigfyhoms5txiqlgjyovm4qufwzbiywf52uprgiqjemccjuk45nl2e",
+      "author": {
+        "did": "did:plc:4a7qekv3khxoadlaeavziztd",
+        "handle": "nerienis.bsky.social",
+        "displayName": "Fortuna Vernalis",
+        "avatar": "https://cdn.bsky.app/img/avatar/plain/did:plc:4a7qekv3khxoadlaeavziztd/bafkreifxns3ykheyjfketveyxlx5uucbaszj4nhjhifdopxcw5rfj5t46e",
+        "associated": {
+          "activitySubscription": {
+            "allowSubscriptions": "followers"
+          }
+        },
+        "viewer": {
+          "muted": false,
+          "blockedBy": false
+        },
+        "labels": [
+          {
+            "src": "did:plc:4a7qekv3khxoadlaeavziztd",
+            "uri": "at://did:plc:4a7qekv3khxoadlaeavziztd/app.bsky.actor.profile/self",
+            "cid": "bafyreifqj3szxrklewfotxovw2c5xe3fschg2uqbrpox2gobb7inplvrj4",
+            "val": "!no-unauthenticated",
+            "cts": "2024-11-12T18:31:46.347Z"
+          }
+        ],
+        "createdAt": "2024-11-12T18:31:47.016Z"
+      },
+      "record": {
+        "$type": "app.bsky.feed.post",
+        "createdAt": "2026-05-14T02:55:23.900Z",
+        "embed": {
+          "$type": "app.bsky.embed.external",
+          "external": {
+            "description": "",
+            "title": "Patapsco River at Ellicott City",
+            "uri": "https://water.noaa.gov/gauges/elpm2"
+          }
+        },
+        "facets": [
+          {
+            "features": [
+              {
+                "$type": "app.bsky.richtext.facet#link",
+                "uri": "https://water.noaa.gov/gauges/elpm2"
+              }
+            ],
+            "index": {
+              "byteEnd": 278,
+              "byteStart": 251
+            }
+          }
+        ],
+        "langs": [
+          "en"
+        ],
+        "reply": {
+          "parent": {
+            "cid": "bafyreibt5jty43y6t5xe7mdqglhv5r6s77macmvoz3oa5apod33lduse5m",
+            "uri": "at://did:plc:df7a3hug7lhxsnlox7h7dnqf/app.bsky.feed.post/3mlrrzi6c4c24"
+          },
+          "root": {
+            "cid": "bafyreibt5jty43y6t5xe7mdqglhv5r6s77macmvoz3oa5apod33lduse5m",
+            "uri": "at://did:plc:df7a3hug7lhxsnlox7h7dnqf/app.bsky.feed.post/3mlrrzi6c4c24"
+          }
+        },
+        "text": "Wowwwwwww, there\u2019s dumb and then there\u2019s the folks for whom that page was written! But it looks like OEC is safe for the moment - they\u2019re far enough along on the flood mitigation project that it\u2019ll withstand a LOT more rain than it used to. \n\nwater.noaa.gov/gauges/elpm2"
+      },
+      "embed": {
+        "external": {
+          "uri": "https://water.noaa.gov/gauges/elpm2",
+          "title": "Patapsco River at Ellicott City",
+          "description": ""
+        },
+        "$type": "app.bsky.embed.external#view"
+      },
+      "bookmarkCount": 0,
+      "replyCount": 0,
+      "repostCount": 0,
+      "likeCount": 1,
+      "quoteCount": 0,
+      "indexedAt": "2026-05-14T02:55:24.166Z",
+      "viewer": {
+        "bookmarked": false,
+        "threadMuted": false,
+        "embeddingDisabled": false
+      },
+      "labels": []
+    }
+  }
+]

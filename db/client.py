@@ -162,6 +162,82 @@ def insert_raw_records(
     return inserted
 
 
+def insert_social_media_posts(
+    records: Sequence[dict],
+    *,
+    platform: str,
+    source: str,
+    source_url: str | None,
+    file_path: str | None,
+    batch_id: str,
+) -> int:
+    """Insert normalized social posts into ``raw.social_media_posts``.
+
+    Social-media raw rows need the standard audit columns plus platform and
+    post identifiers so repeated runs can upsert the same public post without
+    creating duplicates.
+    """
+    if not records:
+        return 0
+
+    rows = []
+    for record in records:
+        post_id = record.get("post_id")
+        if not post_id:
+            raise ValueError("social media records must include a non-empty post_id")
+        rows.append(
+            {
+                "platform": platform,
+                "source": source,
+                "source_url": source_url,
+                "post_id": str(post_id),
+                "file_path": file_path,
+                "batch_id": batch_id,
+                "payload": json.dumps(
+                    _clean_for_json(record),
+                    default=str,
+                    allow_nan=False,
+                ),
+            }
+        )
+
+    sql = text(
+        """
+        INSERT INTO raw.social_media_posts
+            (platform, source, source_url, post_id, file_path, batch_id, payload)
+        VALUES
+            (:platform, :source, :source_url, :post_id, :file_path, :batch_id,
+             CAST(:payload AS JSONB))
+        ON CONFLICT (platform, post_id) DO UPDATE SET
+            source      = EXCLUDED.source,
+            source_url  = EXCLUDED.source_url,
+            file_path   = EXCLUDED.file_path,
+            batch_id    = EXCLUDED.batch_id,
+            ingested_at = NOW(),
+            payload     = EXCLUDED.payload
+        """
+    )
+    chunk = 50
+    inserted = 0
+    for i in range(0, len(rows), chunk):
+        slice_ = rows[i : i + chunk]
+        execute_with_retry(sql, slice_)
+        inserted += len(slice_)
+        if (i // chunk) % 20 == 0 and i > 0:
+            logger.info(
+                "  raw.social_media_posts - %s / %s rows upserted...",
+                inserted,
+                len(rows),
+            )
+    logger.info(
+        "Upserted %s rows into raw.social_media_posts (platform=%s, batch=%s)",
+        inserted,
+        platform,
+        batch_id,
+    )
+    return inserted
+
+
 def execute_with_retry(sql, params, *, attempts: int = 4) -> None:
     """Execute one chunk with exponential backoff on transient pooler drops."""
     last_exc: Exception | None = None

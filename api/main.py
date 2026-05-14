@@ -65,11 +65,14 @@ if _STATIC_DIR.exists():
 # `marts.flood_events` is still queryable directly via SQL for auditing
 # but is intentionally not exposed through the API.
 _MART_VIEWS = {
-    "events":     "marts.flood_events_unique",
-    "by_region":  "marts.flood_events_by_region",
-    "by_h3":      "marts.flood_events_by_h3",
-    "by_basin":   "marts.flood_frequency_by_basin",
-    "by_month":   "marts.flood_events_by_month",
+    "events":                    "marts.flood_events_unique",
+    "events_with_social":        "marts.flood_events_with_social_signals",
+    "social_signals":            "marts.social_flood_signals",
+    "social_by_country_day":     "marts.social_signals_by_country_day",
+    "by_region":                 "marts.flood_events_by_region",
+    "by_h3":                     "marts.flood_events_by_h3",
+    "by_basin":                  "marts.flood_frequency_by_basin",
+    "by_month":                  "marts.flood_events_by_month",
 }
 
 
@@ -143,9 +146,13 @@ def _service_info() -> dict[str, Any]:
             "/flood-events/by-time",
             "/flood-events/by-severity",
             "/flood-events/by-h3",
+            "/flood-events/with-social-signals",
+            "/social-signals",
             "/analytics/frequency-by-basin",
             "/analytics/by-month",
             "/analytics/by-source",
+            "/analytics/social-signals/by-platform",
+            "/analytics/social-signals/by-country-day",
         ],
     }
 
@@ -189,6 +196,62 @@ def flood_events(
         LIMIT :limit OFFSET :offset
     """
     return _query(sql, source=source, limit=limit, offset=offset)
+
+
+@app.get("/flood-events/with-social-signals", tags=["events"])
+def flood_events_with_social_signals(
+    limit: int = Query(100, ge=1, le=1000),
+    offset: int = Query(0, ge=0),
+    country: Optional[str] = None,
+    min_social_signals: int = Query(0, ge=0),
+) -> list[dict[str, Any]]:
+    _ensure_or_503(_MART_VIEWS["events_with_social"])
+    where = """
+        WHERE (:country IS NULL OR country ILIKE :country)
+          AND social_signal_count >= :min_social_signals
+    """
+    sql = f"""
+        SELECT *
+        FROM {_MART_VIEWS["events_with_social"]}
+        {where}
+        ORDER BY social_signal_count DESC, date_start DESC NULLS LAST
+        LIMIT :limit OFFSET :offset
+    """
+    return _query(
+        sql,
+        country=country,
+        min_social_signals=min_social_signals,
+        limit=limit,
+        offset=offset,
+    )
+
+
+@app.get("/social-signals", tags=["social"])
+def social_signals(
+    limit: int = Query(100, ge=1, le=1000),
+    offset: int = Query(0, ge=0),
+    platform: Optional[str] = None,
+    country: Optional[str] = None,
+    min_confidence: float = Query(0.0, ge=0.0, le=1.0),
+) -> list[dict[str, Any]]:
+    _ensure_or_503(_MART_VIEWS["social_signals"])
+    sql = f"""
+        SELECT *
+        FROM {_MART_VIEWS["social_signals"]}
+        WHERE (:platform IS NULL OR platform = :platform)
+          AND (:country IS NULL OR country ILIKE :country)
+          AND COALESCE(signal_confidence, 0) >= :min_confidence
+        ORDER BY created_at DESC NULLS LAST
+        LIMIT :limit OFFSET :offset
+    """
+    return _query(
+        sql,
+        platform=platform,
+        country=country,
+        min_confidence=min_confidence,
+        limit=limit,
+        offset=offset,
+    )
 
 
 @app.get("/flood-events/by-region", tags=["events"])
@@ -306,6 +369,59 @@ def by_source() -> list[dict[str, Any]]:
         ORDER BY event_count DESC
     """
     return _query(sql)
+
+
+@app.get("/analytics/social-signals/by-platform", tags=["analytics"])
+def social_signals_by_platform() -> list[dict[str, Any]]:
+    _ensure_or_503(_MART_VIEWS["social_signals"])
+    sql = f"""
+        SELECT
+            platform,
+            COUNT(*)::bigint AS signal_count,
+            COUNT(*) FILTER (WHERE country IS NOT NULL)::bigint AS with_country,
+            COUNT(*) FILTER (WHERE h3_index IS NOT NULL)::bigint AS with_h3,
+            AVG(signal_confidence) AS avg_signal_confidence,
+            MIN(created_at) AS earliest_signal,
+            MAX(created_at) AS latest_signal
+        FROM {_MART_VIEWS["social_signals"]}
+        GROUP BY platform
+        ORDER BY signal_count DESC
+    """
+    return _query(sql)
+
+
+@app.get("/analytics/social-signals/by-country-day", tags=["analytics"])
+def social_signals_by_country_day(
+    country: Optional[str] = None,
+    start: Optional[datetime] = Query(None, description="ISO date inclusive"),
+    end: Optional[datetime] = Query(None, description="ISO date inclusive"),
+    min_confidence: float = Query(0.0, ge=0.0, le=1.0),
+    limit: int = Query(500, ge=1, le=5000),
+) -> list[dict[str, Any]]:
+    """Per-day, per-country rollup of social flood signals.
+
+    Useful for monitoring bursts of public flood chatter that operators may
+    want to cross-check against authoritative event sources.
+    """
+    _ensure_or_503(_MART_VIEWS["social_by_country_day"])
+    sql = f"""
+        SELECT *
+        FROM {_MART_VIEWS["social_by_country_day"]}
+        WHERE (:country IS NULL OR country ILIKE :country)
+          AND (:start   IS NULL OR signal_date >= :start)
+          AND (:end     IS NULL OR signal_date <= :end)
+          AND COALESCE(avg_signal_confidence, 0) >= :min_confidence
+        ORDER BY signal_date DESC, signal_count DESC
+        LIMIT :limit
+    """
+    return _query(
+        sql,
+        country=country,
+        start=start,
+        end=end,
+        min_confidence=min_confidence,
+        limit=limit,
+    )
 
 
 if __name__ == "__main__":
