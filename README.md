@@ -2,8 +2,9 @@
 
 An automated, reproducible data pipeline that aggregates historical and
 near-real-time flood-event data from satellite observations, government
-disaster databases, and crowd-sourced news feeds into a single, unified,
-analysis-ready PostGIS / H3 database, exposed through a FastAPI service.
+disaster databases, humanitarian news feeds, and public social-media flood
+signals into a single, unified, analysis-ready PostGIS / H3 database, exposed
+through a FastAPI service and an interactive dashboard.
 
 ## 1. Architecture
 
@@ -13,22 +14,24 @@ analysis-ready PostGIS / H3 database, exposed through a FastAPI service.
                            |  flood_event_pipeline    |
                            +--------------------------+
                                     |
-        +---------+--------------+-------+----------+--------------+
-        |         |              |          |                     |
-   Dartmouth_FO  Dartmouth_      Copernicus EMS   EM-DAT      ReliefWeb API
-   (HDX, frozen) MasterList     (Rapid Mapping)   (CRED HDX)
+        +---------+--------------+-------+----------+--------------+----------+
+        |         |              |       |          |              |          |
+   Dartmouth_FO  Dartmouth_      Copernicus EMS   EM-DAT      ReliefWeb API  Bluesky
+   (HDX, frozen) MasterList     (Rapid Mapping)   (CRED HDX)                 search API
                  (live, DFO)
-        |         |              |          |                     |
-        v         v              v          v                     v
+        |         |              |       |          |              |          |
+        v         v              v       v          v              v          v
    data/raw/<source>/  (CSV / XLSX / JSON / SHP snapshots + .meta.json sidecars)
-        \____________________  \_____  ____________________/
-                              \      \/
-                          INSERT into raw.<source>_events  (JSONB payload)
+        \____________________  \_____  ____________________/                 |
+                              \      \/                                      |
+                          INSERT into raw.<source>_events                    |
+                          raw.social_media_posts  <-------------------------/
                                   |
                   transformations/transform.py
-                                  |
-                                  v
-                     staging.flood_events  (canonical, H3 + PostGIS)
+                     |                            |
+                     v                            v
+        staging.flood_events              staging.social_flood_signals
+        (canonical, H3 + PostGIS)         (filtered social observations)
                                   |
                   transformations/marts.py
                                   |
@@ -36,18 +39,21 @@ analysis-ready PostGIS / H3 database, exposed through a FastAPI service.
               marts.flood_events           (raw projection, audit)
               marts.flood_events_unique    (deduped, canonical for analytics)
               marts.flood_events_by_*      (rollups built on _unique)
+              marts.social_flood_signals
+              marts.social_signals_by_country_day
+              marts.flood_events_with_social_signals
                                   |
                                   v
-                          FastAPI (api/main.py)
+                          FastAPI + dashboard (api/main.py)
 ```
 
 ### Schemas
 
 | Schema    | Purpose                                                        |
 |-----------|----------------------------------------------------------------|
-| `raw`     | Untouched ingestion. One JSONB row per source row + audit log. |
-| `staging` | Canonical unified `flood_events` table (defined in `db/schema.sql`). |
-| `marts`   | API-ready views built on top of `staging`.                     |
+| `raw`     | Untouched ingestion. One JSONB row per source row / social post + audit log. |
+| `staging` | Canonical unified `flood_events` table and normalized `social_flood_signals`. |
+| `marts`   | API-ready views built on top of `staging`, including social rollups. |
 
 The full DDL lives in [`db/schema.sql`](./db/schema.sql) and is applied
 idempotently by the pipeline's first task.
@@ -87,13 +93,15 @@ idempotently by the pipeline's first task.
 │   │                                  #   feed a separate raw table.
 │   ├── ingest_copernicus_ems.py
 │   ├── ingest_emdat.py
-│   └── ingest_reliefweb.py
+│   ├── ingest_reliefweb.py
+│   └── ingest_bluesky.py             # public Bluesky flood-signal ingestion
 ├── requirements/base.txt
 ├── scripts/                                   # one-off utility scripts
 │   └── _make_status_pdf.py
 ├── transformations/                           # raw -> staging -> marts
 │   ├── __init__.py
 │   ├── transform.py
+│   ├── social_geo.py                 # lightweight place/country inference
 │   └── marts.py
 ├── validation/                                # data-quality layer
 │   ├── __init__.py
@@ -115,6 +123,11 @@ All credentials and tunables come from `.env`:
 | `RELIEFWEB_APPNAME`  | App identifier sent to the public ReliefWeb API.     |
 | `EMDAT_DOWNLOAD_URL` | Optional signed URL for EM-DAT bulk export.          |
 | `CDS_API_URL`/`CDS_API_KEY` | Optional Copernicus CDS credentials. Real GloFAS reanalysis is **not yet wired** — these are kept as a placeholder for a future ingester. |
+| `ENABLE_SOCIAL_MEDIA_INGESTION` | Enables the optional Bluesky task inside the Airflow DAG. |
+| `BLUESKY_HANDLE` / `BLUESKY_APP_PASSWORD` | Optional Bluesky App Password credentials. When set, search uses the authenticated `bsky.social` PDS endpoint instead of the public AppView. |
+| `BLUESKY_MAX_POSTS` | Maximum normalized posts to upsert per Bluesky ingestion run. |
+| `BLUESKY_PER_QUERY_LIMIT` | Per-keyword search page size sent to Bluesky. |
+| `BLUESKY_LOOKBACK_HOURS` | Rolling time window for scheduled Bluesky ingestion runs. |
 
 ## 4. Running with Docker
 
@@ -146,6 +159,28 @@ CLI alternative:
 docker exec -it flood_airflow airflow dags trigger flood_event_pipeline
 ```
 
+### Running only the API + social pipeline with Docker
+
+If I only need to verify the social-media integration and dashboard before a
+push, I can run the lightweight API image and execute ingestion/transform as
+one-off containers:
+
+```bash
+# Build and start the FastAPI service
+docker compose build api
+docker compose up -d --no-deps api
+
+# Ingest public Bluesky flood posts into raw.social_media_posts
+docker run --rm --env-file .env -v "${PWD}:/app" -w /app -e PYTHONPATH=/app \
+  global-flood-event-data-pipeline-with-satellite-and-crowdsourced-data-api \
+  python -m ingestion.ingest_bluesky
+
+# Transform social posts and refresh marts
+docker run --rm --env-file .env -v "${PWD}:/app" -w /app -e PYTHONPATH=/app \
+  global-flood-event-data-pipeline-with-satellite-and-crowdsourced-data-api \
+  python -c "from transformations.transform import transform_social_media_posts; from transformations.marts import refresh_marts; print(transform_social_media_posts()); refresh_marts()"
+```
+
 ## 5. Running locally (without Docker)
 
 ```bash
@@ -159,6 +194,7 @@ python -c "from db.client import apply_schema_sql; apply_schema_sql()"
 # 2) Run a single source (or all)
 python -m ingestion.ingest_dartmouth
 python -m ingestion.ingest_reliefweb
+python -m ingestion.ingest_bluesky
 # ...
 
 # 3) Transform raw -> staging
@@ -193,6 +229,13 @@ SELECT * FROM marts.flood_frequency_by_basin
 WHERE year >= 2010
 ORDER BY event_count DESC
 LIMIT 20;
+
+-- social-media flood signal counts
+SELECT COUNT(*) FROM raw.social_media_posts;
+SELECT platform, COUNT(*) FROM staging.social_flood_signals GROUP BY platform;
+SELECT * FROM marts.social_signals_by_country_day
+ORDER BY signal_date DESC, signal_count DESC
+LIMIT 20;
 ```
 
 ## 7. Querying the API
@@ -206,16 +249,28 @@ curl "http://localhost:8000/flood-events/by-region?country=Vietnam"
 curl "http://localhost:8000/flood-events/by-time?start=2020-01-01&end=2020-12-31"
 curl "http://localhost:8000/flood-events/by-severity?min_severity=2"
 curl "http://localhost:8000/flood-events/by-h3?h3_index=87283472bffffff"
+curl "http://localhost:8000/flood-events/with-social-signals?limit=5"
+curl "http://localhost:8000/social-signals?limit=5"
 curl "http://localhost:8000/analytics/frequency-by-basin?basin=Vietnam"
+curl "http://localhost:8000/analytics/social-signals/by-platform"
+curl "http://localhost:8000/analytics/social-signals/by-country-day?limit=20"
 ```
 
 Interactive Swagger UI: <http://localhost:8000/docs>.
+
+Interactive dashboard: <http://localhost:8000/>. The dashboard includes a
+social-signals KPI card and endpoint explorer buttons for the social routes.
 
 ## 8. Data sources
 
 See [`docs/data_sources.md`](./docs/data_sources.md) for the full list of
 source URLs, ingestion mechanisms, license / access constraints, and
 fallback behaviour.
+
+The social-media branch currently targets Bluesky. It searches multilingual
+flood-related keywords, stores retained posts in `raw.social_media_posts`,
+normalizes them into `staging.social_flood_signals`, and exposes them through
+the social marts and API routes listed above.
 
 ## 9. Known limitations
 
@@ -239,6 +294,15 @@ fallback behaviour.
   than "permanently displaced" (it includes precautionary evacuees and
   exposed populations). Compare per-event values against EM-DAT for a
   stricter definition.
+- **Social-media precision**: Bluesky posts are public situational signals,
+  not authoritative disaster records. The pipeline uses flood keywords,
+  context terms, political/metaphorical exclusion rules, confidence scores,
+  and lightweight place-name inference to reduce noise, but high-impact
+  signals should still be cross-checked against authoritative sources.
+- **Social-media geolocation**: Most public posts do not include exact
+  coordinates. The current implementation infers country/place only when the
+  text contains reliable country, adjective, US state, timezone, or city-state
+  patterns. H3 indexing is only available when coordinates exist.
 
 ## 10. Recommended next steps
 
@@ -252,3 +316,7 @@ fallback behaviour.
    future source publishes events under non-DFO IDs that nonetheless
    cover the same floods (currently we only dedupe across the DFO
    Register# space).
+5. Expand social-media ingestion beyond Bluesky with source-specific adapters
+   that write into the same `raw.social_media_posts` contract.
+6. Replace the lightweight rule-based social geocoder with a gazetteer-backed
+   or NER-based approach for better place extraction and event matching.
