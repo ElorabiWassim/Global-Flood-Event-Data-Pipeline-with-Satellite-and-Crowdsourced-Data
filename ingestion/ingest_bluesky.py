@@ -83,7 +83,6 @@ STRONG_FLOOD_TERMS = (
     "flood rescue",
     "flood evacuation",
     "inundation",
-    "inundated",
     "river overflow",
     "overflowing river",
     "dam overflow",
@@ -172,6 +171,15 @@ DEFAULT_EXCLUDED_PHRASES = (
     "flood of data",
     "flood the timeline",
     "flooded timeline",
+    "newsfeed is inundated",
+    "feed is inundated",
+    "inundated with stories",
+    "inundated with posts",
+    "inundated with reposts",
+    "inundated with triplicates",
+    "avoir crue",
+    "j'ai crue",
+    "j\u2019ai crue",
     "market flood",
     "flood sale",
     "flood insurance ad",
@@ -208,6 +216,21 @@ _POLITICAL_METAPHOR_PATTERN = re.compile(
     r"system|government|hill|capitol|"
     r"comments?|timeline|mentions?|feed|"
     r"chat|chats|dms?|replies?)\b",
+    re.IGNORECASE,
+)
+
+_INUNDATED_METAPHOR_PATTERN = re.compile(
+    r"\binundated\s+(?:with|in|by)\s+"
+    r"(?:stories|posts?|reposts?|messages?|emails?|notifications?|"
+    r"requests?|information|data|news|updates?|content|work|calls?|"
+    r"triplicates?|olds|visitors?|tourists?|fans|customers?|crowds?)\b",
+    re.IGNORECASE,
+)
+
+_CROWD_STREETS_METAPHOR_PATTERN = re.compile(
+    r"(?:fans?|crowds?|tourists?|visitors?).{0,80}"
+    r"\bflood(?:ing|ed)?\s+(?:downtown\s+)?streets?\b|"
+    r"\bflood(?:ing|ed)?\s+(?:downtown\s+)?streets?\s+ahead\s+of\b",
     re.IGNORECASE,
 )
 
@@ -321,6 +344,14 @@ def _excluded_keywords(text: str) -> list[str]:
     matches = [phrase for phrase in DEFAULT_EXCLUDED_PHRASES if phrase in folded]
     if _POLITICAL_METAPHOR_PATTERN.search(text):
         marker = "political_metaphor:flood_the_<institution>"
+        if marker not in matches:
+            matches.append(marker)
+    if _INUNDATED_METAPHOR_PATTERN.search(text):
+        marker = "metaphor:inundated_with_content"
+        if marker not in matches:
+            matches.append(marker)
+    if _CROWD_STREETS_METAPHOR_PATTERN.search(text):
+        marker = "metaphor:crowd_flooding_streets"
         if marker not in matches:
             matches.append(marker)
     return matches

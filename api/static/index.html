@@ -135,12 +135,13 @@
   <main class="mx-auto max-w-7xl px-6 py-8 space-y-8">
 
     <!-- ===================== KPI cards ===================== -->
-    <section aria-label="Key metrics" class="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
+    <section aria-label="Key metrics" class="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-5">
       <!-- Cards rendered dynamically -->
       <div class="kpi-card rounded-xl bg-white p-5 shadow-soft ring-1 ring-slate-200" data-key="events"></div>
       <div class="kpi-card rounded-xl bg-white p-5 shadow-soft ring-1 ring-slate-200" data-key="sources"></div>
       <div class="kpi-card rounded-xl bg-white p-5 shadow-soft ring-1 ring-slate-200" data-key="deaths"></div>
       <div class="kpi-card rounded-xl bg-white p-5 shadow-soft ring-1 ring-slate-200" data-key="displaced"></div>
+      <div class="kpi-card rounded-xl bg-white p-5 shadow-soft ring-1 ring-slate-200" data-key="social_signals"></div>
     </section>
 
     <!-- ===================== Charts row ===================== -->
@@ -192,6 +193,44 @@
           <i data-lucide="bar-chart-3" class="h-5 w-5 text-ocean-600"></i>
         </div>
         <div class="mt-4"><canvas id="chart-severity" height="260"></canvas></div>
+      </div>
+    </section>
+
+    <!-- ===================== Social signal statistics ===================== -->
+    <section class="grid grid-cols-1 gap-6 lg:grid-cols-[0.85fr,1.15fr]">
+      <div class="rounded-xl bg-white p-6 shadow-soft ring-1 ring-slate-200">
+        <div class="flex items-center justify-between">
+          <div>
+            <h2 class="text-base font-semibold text-slate-900">Social signals by platform</h2>
+            <p class="text-xs text-slate-500">Public posts classified as flood-related social evidence.</p>
+          </div>
+          <i data-lucide="messages-square" class="h-5 w-5 text-ocean-600"></i>
+        </div>
+        <div class="mt-4"><canvas id="chart-social-platform" height="220"></canvas></div>
+      </div>
+
+      <div class="rounded-xl bg-white p-6 shadow-soft ring-1 ring-slate-200">
+        <div class="flex items-center justify-between">
+          <div>
+            <h2 class="text-base font-semibold text-slate-900">Recent social signal bursts</h2>
+            <p class="text-xs text-slate-500">Latest country/day rollups from the social media mart.</p>
+          </div>
+          <i data-lucide="activity" class="h-5 w-5 text-ocean-600"></i>
+        </div>
+        <div class="mt-4 overflow-x-auto scrollbar-thin">
+          <table class="min-w-full divide-y divide-slate-200 text-sm">
+            <thead class="bg-slate-50 text-left text-xs font-semibold uppercase tracking-wider text-slate-500">
+              <tr>
+                <th class="px-3 py-2.5">Country</th>
+                <th class="px-3 py-2.5">Signal date</th>
+                <th class="px-3 py-2.5 text-right">Signals</th>
+                <th class="px-3 py-2.5 text-right">High confidence</th>
+                <th class="px-3 py-2.5 text-right">Avg confidence</th>
+              </tr>
+            </thead>
+            <tbody id="social-bursts-tbody" class="divide-y divide-slate-100 bg-white"></tbody>
+          </table>
+        </div>
       </div>
     </section>
 
@@ -301,12 +340,20 @@
       'EM-DAT': '#8B5CF6',
       'ReliefWeb': '#EF4444',
     };
+    const SOCIAL_COLORS = {
+      bluesky: '#0284C7',
+      twitter: '#111827',
+      mastodon: '#6366F1',
+      facebook: '#2563EB',
+      default: '#94A3B8',
+    };
     const fmt = new Intl.NumberFormat('en-US');
     const KPI_DEFS = {
       events: { label: 'Total events', icon: 'database', accent: 'text-ocean-600 bg-ocean-100' },
       sources: { label: 'Active sources', icon: 'layers', accent: 'text-emerald-600 bg-emerald-100' },
       deaths: { label: 'Total deaths', icon: 'skull', accent: 'text-rose-600 bg-rose-100' },
       displaced: { label: 'Total displaced', icon: 'users-round', accent: 'text-amber-600 bg-amber-100' },
+      social_signals: { label: 'Social signals', icon: 'message-circle', accent: 'text-sky-600 bg-sky-100' },
     };
 
     const charts = {};
@@ -459,6 +506,56 @@
       }, { plugins: { legend: { display: false } } });
     }
 
+    function renderSocialBursts(rows) {
+      const tbody = document.getElementById('social-bursts-tbody');
+      if (!rows.length) {
+        tbody.innerHTML = `<tr><td colspan="5" class="px-3 py-8 text-center text-slate-400">No social signal rollups available yet.</td></tr>`;
+        return;
+      }
+      tbody.innerHTML = rows.slice(0, 8).map(r => {
+        const avg = Number(r.avg_signal_confidence);
+        return `
+          <tr class="hover:bg-slate-50">
+            <td class="px-3 py-2 font-medium text-slate-900">${safe(r.country)}</td>
+            <td class="px-3 py-2 text-slate-600 tabular-nums">${r.signal_date ? r.signal_date.slice(0, 10) : '—'}</td>
+            <td class="px-3 py-2 text-right tabular-nums">${fmt.format(Number(r.signal_count) || 0)}</td>
+            <td class="px-3 py-2 text-right tabular-nums">${fmt.format(Number(r.high_confidence_count) || 0)}</td>
+            <td class="px-3 py-2 text-right tabular-nums">${isFinite(avg) ? avg.toFixed(2) : '—'}</td>
+          </tr>`;
+      }).join('');
+    }
+
+    async function loadSocialStats() {
+      try {
+        const [platformRows, countryDayRows] = await Promise.all([
+          fetchJSON('/analytics/social-signals/by-platform'),
+          fetchJSON('/analytics/social-signals/by-country-day', { limit: 20 }),
+        ]);
+        const platformLabels = platformRows.map(r => r.platform || 'unknown');
+        const platformCounts = platformRows.map(r => Number(r.signal_count) || 0);
+        makeChart('chart-social-platform', 'doughnut', {
+          labels: platformLabels,
+          datasets: [{
+            data: platformCounts,
+            backgroundColor: platformLabels.map(s => SOCIAL_COLORS[s] || SOCIAL_COLORS.default),
+            borderWidth: 2,
+            borderColor: '#fff'
+          }]
+        }, { cutout: '62%', plugins: { legend: { position: 'right' } } });
+        renderSocialBursts(countryDayRows);
+
+        const total = platformCounts.reduce((acc, n) => acc + n, 0);
+        const subParts = platformRows
+          .filter(r => Number(r.signal_count) > 0)
+          .map(r => `${r.platform}: ${fmt.format(Number(r.signal_count))}`);
+        return { total, sub: subParts.join(' · ') || 'No social signals yet' };
+      } catch (e) {
+        console.warn('social stats unavailable', e);
+        renderSocialBursts([]);
+        return { total: null, sub: 'No social marts yet' };
+      }
+    }
+
     // ---------- Events table ----------
     async function loadEvents() {
       const source = document.getElementById('filter-source').value;
@@ -526,6 +623,10 @@
       { method: 'GET', path: '/analytics/frequency-by-basin', label: 'Frequency by basin' },
       { method: 'GET', path: '/analytics/by-month', label: 'By month' },
       { method: 'GET', path: '/analytics/by-source', label: 'By source' },
+      { method: 'GET', path: '/social-signals?limit=10', label: 'Social signals' },
+      { method: 'GET', path: '/flood-events/with-social-signals?limit=10', label: 'Events + social' },
+      { method: 'GET', path: '/analytics/social-signals/by-platform', label: 'Social by platform' },
+      { method: 'GET', path: '/analytics/social-signals/by-country-day?limit=20', label: 'Social by country/day' },
     ];
     function buildEndpointButtons() {
       const wrap = document.getElementById('endpoint-buttons');
@@ -558,20 +659,22 @@
       buildEndpointButtons();
       refreshHealth();
       try {
-        const [monthly, , bySource] = await Promise.all([
+        const [monthly, , bySource, , social] = await Promise.all([
           loadMonthly(),
           loadCountries(),
           loadBySource(),
           loadSeverity(),
+          loadSocialStats(),
         ]);
         renderKPICard('events', fmt.format(bySource.totalEvents), monthly.span);
         renderKPICard('sources', String(bySource.activeCount), `Of ${Object.keys(SOURCE_COLORS).length} configured`);
         renderKPICard('deaths', fmt.format(bySource.totalDeaths));
         renderKPICard('displaced', fmt.format(bySource.totalDisplaced));
+        renderKPICard('social_signals', social.total == null ? '—' : fmt.format(social.total), social.sub);
         populateSourceFilter(bySource.totalsBySource);
       } catch (e) {
         console.error('init failed', e);
-        ['events', 'sources', 'deaths', 'displaced'].forEach(k => renderKPICard(k, '—', 'API unreachable'));
+        ['events', 'sources', 'deaths', 'displaced', 'social_signals'].forEach(k => renderKPICard(k, '—', 'API unreachable'));
       }
       loadEvents();
       document.getElementById('filter-apply').addEventListener('click', loadEvents);

@@ -229,6 +229,21 @@ def test_post_to_record_excludes_keyword_without_disaster_context():
     assert record is None
 
 
+def test_inundated_requires_disaster_context():
+    weak = bluesky._post_to_record(
+        _post("at://did/app.bsky.feed.post/abc123", "Charlottesville is about to be inundated with visitors"),
+        ["inundated"],
+    )
+    contextual = bluesky._post_to_record(
+        _post("at://did/app.bsky.feed.post/abc456", "Downtown streets are inundated after heavy rain"),
+        ["inundated"],
+    )
+
+    assert weak is None
+    assert contextual is not None
+    assert "inundated" in contextual["matched_keywords"]
+
+
 def test_classify_text_keeps_weak_keyword_when_context_exists():
     out = bluesky._classify_text(
         "Flooding downtown after heavy rain, road closed",
@@ -272,6 +287,46 @@ def test_classify_text_rejects_political_metaphors(text):
         or excl in bluesky.DEFAULT_EXCLUDED_PHRASES
         for excl in out["excluded_keywords"]
     ), f"missing political metaphor marker for: {text} (got {out['excluded_keywords']})"
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "My newsfeed is inundated with triplicates of the same story.",
+        "The feed is inundated with posts from accounts I do not follow.",
+        "I am inundated with emails and notifications today.",
+        "Charlottesville is about to be inundated in olds for the concert.",
+    ],
+)
+def test_classify_text_rejects_inundated_content_metaphors(text):
+    out = bluesky._classify_text(text, ["inundated"])
+
+    assert out["keep"] is False
+    assert any(
+        excl == "metaphor:inundated_with_content"
+        or excl in bluesky.DEFAULT_EXCLUDED_PHRASES
+        for excl in out["excluded_keywords"]
+    )
+
+
+def test_classify_text_rejects_french_crue_homograph():
+    out = bluesky._classify_text(
+        "Le type du magasin apres avoir crue raccroche son telephone",
+        ["crue"],
+    )
+
+    assert out["keep"] is False
+    assert "avoir crue" in out["excluded_keywords"]
+
+
+def test_classify_text_rejects_crowd_flooding_streets_metaphor():
+    out = bluesky._classify_text(
+        "Fans worldwide are flooding downtown streets ahead of the album release",
+        ["flood", "flooding"],
+    )
+
+    assert out["keep"] is False
+    assert "metaphor:crowd_flooding_streets" in out["excluded_keywords"]
 
 
 @pytest.mark.parametrize(
