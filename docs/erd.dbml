@@ -169,6 +169,160 @@ Table staging.social_flood_signals {
 }
 
 // -----------------------------------------------------------------------------
+// marts schema (CREATE OR REPLACE VIEW — all defined in transformations/marts.py)
+// -----------------------------------------------------------------------------
+Table marts.flood_events {
+  id                  serial      [pk]
+  source              text
+  source_event_id     text
+  event_name          text
+  main_cause          text
+  date_start          timestamp
+  date_end            timestamp
+  country             text
+  river_basin         text
+  latitude            double
+  longitude           double
+  geometry_geojson    json
+  deaths              integer
+  displaced           integer
+  affected            integer
+  severity            double
+  flood_impact_index  double
+  glide_number        text
+  url                 text
+  h3_index            text
+  loaded_at           timestamptz
+  Note: 'Flat audit projection over staging.flood_events. Preserves both DFO vintages. Not exposed via API.'
+}
+
+Table marts.flood_events_unique {
+  id                  serial      [pk]
+  source              text
+  source_event_id     text
+  event_name          text
+  main_cause          text
+  date_start          timestamp
+  date_end            timestamp
+  country             text
+  river_basin         text
+  latitude            double
+  longitude           double
+  geometry_geojson    json
+  deaths              integer
+  displaced           integer
+  affected            integer
+  severity            double
+  flood_impact_index  double
+  glide_number        text
+  url                 text
+  h3_index            text
+  loaded_at           timestamptz
+  Note: 'Canonical deduped event view. Collapses ~73% DFO Register# overlap between Dartmouth_MasterList (preferred) and Dartmouth_FO. Source of truth for all rollups and for the FastAPI service.'
+}
+
+Table marts.social_flood_signals {
+  id                      bigserial   [pk]
+  platform                text
+  post_id                 text
+  source_event_id         text
+  created_at              timestamptz
+  ingested_at             timestamptz
+  text                    text
+  language                text
+  url                     text
+  author_id_hash          text
+  matched_keywords        "text[]"
+  excluded_keywords       "text[]"
+  flood_relevance_score   double
+  location_confidence     double
+  signal_confidence       double
+  place_name              text
+  country                 text
+  latitude                double
+  longitude               double
+  geometry_geojson        json
+  h3_index                text
+  loaded_at               timestamptz
+  Note: 'Flat projection of staging.social_flood_signals with geometry exposed as GeoJSON.'
+}
+
+Table marts.social_signals_by_country_day {
+  country                  text
+  signal_date              date
+  signal_count             bigint
+  avg_signal_confidence    double
+  high_confidence_count    bigint
+  platforms                "text[]"
+  languages                "text[]"
+  Note: 'Per-day, per-country rollup of social flood signals (count, avg confidence, distinct platforms/languages).'
+}
+
+Table marts.flood_events_with_social_signals {
+  id                            serial   [pk]
+  source                        text
+  source_event_id               text
+  event_name                    text
+  date_start                    timestamp
+  date_end                      timestamp
+  country                       text
+  river_basin                   text
+  latitude                      double
+  longitude                     double
+  geometry_geojson              json
+  deaths                        integer
+  displaced                     integer
+  affected                      integer
+  severity                      double
+  h3_index                      text
+  social_signal_count           bigint
+  first_social_signal_at        timestamptz
+  latest_social_signal_at       timestamptz
+  avg_social_signal_confidence  double
+  social_platforms              "text[]"
+  Note: 'Deduped events left-joined to nearby social signals (h3 OR country match, within [date_start-1d, date_end+3d], signal_confidence > 0).'
+}
+
+Table marts.flood_events_by_region {
+  country         text
+  event_count     bigint
+  total_deaths    bigint
+  total_displaced bigint
+  total_affected  bigint
+  avg_severity    double
+  earliest_event  timestamp
+  latest_event    timestamp
+  Note: 'Per-country rollup built on marts.flood_events_unique.'
+}
+
+Table marts.flood_events_by_h3 {
+  h3_index        text
+  event_count     bigint
+  avg_severity    double
+  total_deaths    bigint
+  earliest_event  timestamp
+  latest_event    timestamp
+  Note: 'Per-H3-cell rollup (resolution 7).'
+}
+
+Table marts.flood_frequency_by_basin {
+  basin           text
+  basin_source    text     [note: 'river_basin | country_proxy | unknown']
+  year            integer
+  event_count     bigint
+  avg_severity    double
+  Note: 'Yearly frequency by river basin (falls back to country when basin is null).'
+}
+
+Table marts.flood_events_by_month {
+  month           date
+  event_count     bigint
+  avg_severity    double
+  total_deaths    bigint
+  Note: 'Monthly time-series rollup over deduped events.'
+}
+
+// -----------------------------------------------------------------------------
 // Logical lineage (no declared FKs - JSONB is parsed by transform.py)
 // -----------------------------------------------------------------------------
 Ref: staging.flood_events.source_event_id        > raw.dartmouth_events.id        [delete: no action]
@@ -177,3 +331,17 @@ Ref: staging.flood_events.source_event_id        > raw.copernicus_ems_events.id 
 Ref: staging.flood_events.source_event_id        > raw.emdat_events.id            [delete: no action]
 Ref: staging.flood_events.source_event_id        > raw.reliefweb_events.id        [delete: no action]
 Ref: staging.social_flood_signals.post_id        > raw.social_media_posts.post_id [delete: no action]
+
+// staging -> marts
+Ref: marts.flood_events.id                       > staging.flood_events.id              [delete: no action]
+Ref: marts.flood_events_unique.id                > staging.flood_events.id              [delete: no action]
+Ref: marts.social_flood_signals.id               > staging.social_flood_signals.id      [delete: no action]
+Ref: marts.social_signals_by_country_day.country > staging.social_flood_signals.country [delete: no action]
+
+// marts -> marts (rollups built on flood_events_unique)
+Ref: marts.flood_events_by_region.country        > marts.flood_events_unique.country    [delete: no action]
+Ref: marts.flood_events_by_h3.h3_index           > marts.flood_events_unique.h3_index   [delete: no action]
+Ref: marts.flood_events_by_month.month           > marts.flood_events_unique.date_start [delete: no action]
+Ref: marts.flood_frequency_by_basin.basin        > marts.flood_events_unique.river_basin [delete: no action]
+Ref: marts.flood_events_with_social_signals.id   > marts.flood_events_unique.id         [delete: no action]
+Ref: marts.flood_events_with_social_signals.social_signal_count > staging.social_flood_signals.id [delete: no action]
