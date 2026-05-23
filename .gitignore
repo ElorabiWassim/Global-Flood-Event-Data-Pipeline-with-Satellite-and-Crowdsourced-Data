@@ -1,0 +1,158 @@
+# ---------------------------------------------------------------------------
+# Secrets & local configuration
+# ---------------------------------------------------------------------------
+.env
+.env.local
+.env.*.local
+*.pem
+*.key
+secrets/
+credentials.json
+service-account*.json
+
+# ---------------------------------------------------------------------------
+# Python
+# ---------------------------------------------------------------------------
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+pip-log.txt
+pip-delete-this-directory.txt
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+env.bak/
+venv.bak/
+
+# Testing / coverage
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.nox/
+coverage.xml
+*.cover
+*.py,cover
+.hypothesis/
+nosetests.xml
+
+# Type checkers
+.mypy_cache/
+.dmypy.json
+dmypy.json
+.pyre/
+.pytype/
+.ruff_cache/
+
+# ---------------------------------------------------------------------------
+# Jupyter
+# ---------------------------------------------------------------------------
+.ipynb_checkpoints/
+*.ipynb_checkpoints
+profile_default/
+ipython_config.py
+
+# ---------------------------------------------------------------------------
+# Apache Airflow (runtime state, not code)
+# ---------------------------------------------------------------------------
+airflow/logs/
+airflow/airflow.db
+airflow/airflow.db-journal
+airflow/airflow.cfg
+airflow/webserver_config.py
+airflow/standalone_admin_password.txt
+airflow/plugins/__pycache__/
+
+# ---------------------------------------------------------------------------
+# dbt
+# ---------------------------------------------------------------------------
+dbt/target/
+dbt/dbt_packages/
+dbt/logs/
+dbt/.user.yml
+
+# ---------------------------------------------------------------------------
+# Data (large / regenerable artifacts)
+# ---------------------------------------------------------------------------
+# Keep small seed CSVs and per-source .meta.json sidecars; ignore everything
+# else under data/raw and the run-time outputs.
+data/raw/**/*.zip
+data/raw/**/*.gz
+data/raw/**/*.tar
+data/raw/**/*.parquet
+data/raw/**/*.tif
+data/raw/**/*.tiff
+data/raw/**/*.nc
+data/raw/copernicus_ems/activations_copernicus_ems-*.json
+data/raw/dartmouth/dfo_records_dartmouth-*.json
+data/processed/
+data/logs/
+
+# ---------------------------------------------------------------------------
+# Docker
+# ---------------------------------------------------------------------------
+*.dockerignore.local
+.docker/
+
+# ---------------------------------------------------------------------------
+# IDE / editor
+# ---------------------------------------------------------------------------
+.idea/
+.vscode/
+*.swp
+*.swo
+*.swn
+*.sublime-project
+*.sublime-workspace
+.history/
+.cursor/
+
+# ---------------------------------------------------------------------------
+# OS
+# ---------------------------------------------------------------------------
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+Desktop.ini
+
+# ---------------------------------------------------------------------------
+# Build / LaTeX (report generation)
+# ---------------------------------------------------------------------------
+*.aux
+*.log
+*.toc
+*.out
+*.synctex.gz
+*.fls
+*.fdb_latexmk
+*.bbl
+*.blg
+*.lof
+*.lot

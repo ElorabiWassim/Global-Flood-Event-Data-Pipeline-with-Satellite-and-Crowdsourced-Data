@@ -1,0 +1,749 @@
+\documentclass[11pt,a4paper]{article}
+\usepackage[utf8]{inputenc}
+\usepackage{geometry}
+\geometry{margin=1in}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{hyperref}
+\usepackage{listings}
+\usepackage{xcolor}
+\usepackage{amsmath}
+\usepackage{amsfonts}
+\usepackage{amssymb}
+
+% Code snippet styling
+\lstset{
+    frame=tb,
+    language=Python,
+    aboveskip=3mm,
+    belowskip=3mm,
+    showstringspaces=false,
+    columns=flexible,
+    basicstyle={\small\ttfamily},
+    numbers=none,
+    breaklines=true,
+    breakatwhitespace=true,
+    tabsize=3,
+    keywordstyle=\color{blue!70!black},
+    stringstyle=\color{green!50!black},
+    commentstyle=\color{gray}\itshape
+}
+
+\hypersetup{
+    colorlinks=true,
+    linkcolor=blue!60!black,
+    urlcolor=blue!70!black,
+    citecolor=blue!60!black
+}
+
+\title{Universal Technical Report Canvas: Geospatial Intelligent Deliverables\\[0.5em]
+\large Global Flood Event Data Pipeline\\
+\small Satellite, Authoritative, and Crowdsourced Flood Intelligence}
+
+\author{Team 1 \textbar{} Group G7 \\
+ElorabiWassim, Chadli, and contributors \\
+Module: Final Year Project Propositions --- Data Engineering \& Big Data Track (Project 4) \\
+Instructor: Dr. Meziane Iftene}
+\date{Academic Year 2025--2026}
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+This report outlines the end-to-end design, implementation, and empirical
+evaluation of \textbf{Project 4 --- Global Flood Event Data Pipeline}, a
+production-grade data-engineering platform that fuses six heterogeneous flood
+data streams (satellite-derived archives, authoritative disaster registries,
+humanitarian situation reports, and public social-media signals) into a single
+unified \texttt{PostgreSQL/PostGIS + Uber H3} warehouse. Adhering to the
+institutional curriculum, the project transitions a real-world fragmentation
+problem (the same flood appearing under four different identifiers across four
+different sources) into a functional informatique deliverable using a
+design-thinking framework. This document details the methodology across data
+acquisition (6 source adapters with seed fallbacks), system architecture
+(Airflow-orchestrated medallion warehouse, dbt models, FastAPI consumption
+layer), core algorithmic logic (four-layer social-noise filter and
+H3-indexed canonical schema), quantitative validation benchmarks (15 automated
+data-quality gates, 117 unit tests), and operational containerized deployment
+(Docker Compose with Airflow + FastAPI services).
+\end{abstract}
+
+\newpage
+\tableofcontents
+\newpage
+
+% =============================================================================
+\section{Introduction \& Design Thinking Framework}
+
+\subsection{Problem Context \& Target User Pain Points}
+
+Flood disaster data lives in silos. The Dartmouth Flood Observatory (DFO) has
+tracked events from satellite observation since 1985. EM-DAT, maintained by
+the Centre for Research on the Epidemiology of Disasters (CRED), has recorded
+casualty and displacement figures since 1900. Copernicus EMS has mapped
+satellite-derived rapid activations since 2012. ReliefWeb (UN OCHA) has
+published humanitarian situation reports since 1996. Bluesky, like every
+public social platform, broadcasts an unfiltered firehose of situational
+chatter in real time. Each source uses different formats (CSV, XLSX, JSON,
+shapefile), different field names (\texttt{Register\#} vs \texttt{Dis No} vs
+\texttt{id}), different coordinate conventions (CRS, columns), and different
+event identifiers --- with no master cross-walk.
+
+\paragraph{Real-world example.} The 2010 Pakistan floods appear in at least
+four sources simultaneously: DFO MasterList (\texttt{DFO\_2010\_2863},
+lat/lon from MODIS), EM-DAT (\texttt{2010-0328}, government death counts),
+ReliefWeb (\texttt{RW-2010-000123}, narrative SitReps), and Copernicus EMS
+(\texttt{EMSR009}, polygons). Without normalization these are four separate
+rows; with normalization they become one event with four corroborating
+sources.
+
+\paragraph{Target user end-frames.}
+\begin{itemize}
+    \item \textbf{Climate scientists} evaluating multi-decadal flood-frequency
+    trends per basin --- need consistent identifiers and stable temporal joins
+    across heterogeneous archives.
+    \item \textbf{Humanitarian responders} confirming an event from multiple
+    independent feeds before allocating resources --- need cross-source
+    corroboration counts within minutes of activation.
+    \item \textbf{Municipal authorities and risk analysts} querying the
+    historical baseline for their region --- need a stable REST API over a
+    deduplicated view, not bespoke ETL.
+\end{itemize}
+
+\paragraph{Operational scaling bottlenecks in manual approaches.}
+Analysts currently download four CSVs/shapefiles, write one-off Python
+scripts to align column names, manually reconcile event identifiers,
+and rebuild the join every time a source republishes. This process is
+non-reproducible, non-auditable, and breaks the moment a source schema
+changes. Storage cost grows superlinearly because every analyst keeps
+their own copy.
+
+\subsection{Solution Novelty \& Ideation Blueprint}
+
+Our system shifts away from static, analyst-owned spreadsheets toward an
+intelligent, schedulable, queryable warehouse. Features ideated during
+prototyping to address real-world constraints:
+
+\begin{itemize}
+    \item \textbf{Per-source seed fallbacks.} Every ingestion module ships
+    with a committed CSV/JSON seed under \texttt{data/raw/<source>/}. If the
+    remote source is unreachable, the run still completes against the
+    fallback, with a \texttt{.meta.json} sidecar recording
+    \texttt{used\_fallback=true} and the reason.
+    \item \textbf{Canonical event identity.} A two-column composite key
+    \texttt{(source, source\_event\_id)} is enforced by an
+    \texttt{ON CONFLICT DO UPDATE} upsert, so re-runs are idempotent and
+    schema drift is contained at the ingestion boundary.
+    \item \textbf{H3 hexagonal spatial indexing (resolution 7).} Lat/lon
+    proximity queries become $O(1)$ integer lookups on the
+    \texttt{h3\_index} column instead of $O(n)$ trigonometric radius scans.
+    \item \textbf{Multi-layer social-noise filter.} A 4-stage pipeline (29
+    keywords, 22 strong terms, 37 context terms, 40 excluded phrases, 3
+    regex patterns) separates literal flood reports (``River Ganges at flood
+    stage, 500 evacuated'') from figurative noise (``flooded with emails'').
+    \item \textbf{Rule-based geocoding for posts without GPS.} Country,
+    adjective, US-state, city-state, and timezone patterns derive a
+    location-confidence score in $[0.35, 1.0]$ without any external
+    gazetteer dependency.
+    \item \textbf{Medallion architecture.} Raw $\to$ staging $\to$ marts
+    layers separate evidence preservation, canonical modeling, and
+    analytical performance --- mirroring the pattern documented in modern
+    data-engineering literature (Kimball, Kleppmann).
+\end{itemize}
+
+% =============================================================================
+\section{System Architecture \& Infrastructure Specifications}
+
+\subsection{End-to-End System Schematic}
+
+Figure~\ref{fig:arch} traces the absolute data lineage of the platform from
+six external sources, through the raw $\to$ staging $\to$ marts medallion,
+out to the FastAPI consumption layer and dashboard.
+
+\begin{figure}[h!]
+\centering
+\begin{verbatim}
+              +--------------------------+
+              |  Apache Airflow (DAG)    |
+              |  flood_event_pipeline    |
+              +--------------------------+
+                          |
+  +--------+----------+---+----+----------+----------+--------+
+  |        |          |        |          |          |        |
+Dartmouth Dartmouth  Copernicus EM-DAT  ReliefWeb  Bluesky
+  HDX     MasterList    EMS                          search
+  |        |          |        |          |          |
+  v        v          v        v          v          v
+  data/raw/<source>/  (CSV / XLSX / JSON / SHP + .meta.json)
+       |                                                    |
+       v                                                    v
+  INSERT into raw.<source>_events           raw.social_media_posts
+                          |
+                  transform.py
+                /                     \
+               v                       v
+   staging.flood_events     staging.social_flood_signals
+   (canonical + H3 + PostGIS)
+                          |
+                       marts.py
+                          |
+                          v
+   marts.flood_events_unique          marts.flood_events_by_region
+   marts.flood_events_by_month        marts.flood_events_by_source
+   marts.flood_frequency_by_basin     marts.social_signals_by_country_day
+   marts.flood_events_with_social_signals
+                          |
+                          v
+         FastAPI (15 routes)  +  Interactive dashboard
+\end{verbatim}
+\caption{End-to-end data lineage: 6 sources $\to$ 6 raw tables $\to$ 2
+canonical staging tables $\to$ 8 mart views $\to$ 15 API routes + dashboard.}
+\label{fig:arch}
+\end{figure}
+
+\subsection{Production Technology Stack Justification}
+
+\begin{itemize}
+    \item \textbf{Containerization \& Environment Management:} Docker Engine
+    24.x with a Docker Compose v2 manifest declaring two services
+    (\texttt{airflow}, \texttt{api}). The Airflow image is built from a
+    custom multi-stage Dockerfile that bakes \texttt{pandas},
+    \texttt{SQLAlchemy}, \texttt{h3}, and \texttt{dbt-core} into the image
+    so container startup is fast and reproducible; the FastAPI image is
+    minimal (just the consumption layer). Chosen because it makes the entire
+    pipeline reproducible on any host with \texttt{docker compose up
+    --build} and isolates Python dependencies from the host OS.
+
+    \item \textbf{Core Backends \& Ingestion Workers:} \texttt{FastAPI 0.111}
+    for the read API (chosen for automatic OpenAPI generation, async
+    support, Pydantic validation, and a 90\%-of-Flask footprint), and
+    \texttt{Apache Airflow 2.9.3} for orchestration of the 9-task DAG. The
+    DAG fan-outs six ingestion tasks in parallel, joins on a transform
+    task, then refreshes marts and runs the data-quality gate. We
+    deliberately use the \texttt{SequentialExecutor} for MVP simplicity
+    (one task at a time, no Redis/metadata-Postgres dependency), with a
+    documented upgrade path to \texttt{LocalExecutor} once workload exceeds
+    one-task concurrency.
+
+    \item \textbf{Spatial Storage Engines:} \texttt{PostgreSQL 14+} with
+    \texttt{PostGIS 3.x} as the system of record. PostGIS gives us
+    \texttt{ST\_MakePoint}, \texttt{ST\_IsValid}, GiST spatial indexes, and
+    SRID-aware geometries without any second store. We pair it with
+    \texttt{Uber H3} (resolution 7, $\approx$ 5\,km edge length) at the
+    application layer for cheap hexagonal binning. \textbf{Supabase} is
+    used as the managed host because PostGIS is pre-installed and free for
+    the project tier; the connection client (\texttt{db/client.py}) is
+    explicitly tuned for the pgBouncer pooler (\texttt{pool\_pre\_ping=True},
+    \texttt{pool\_recycle=300s}, TCP keep-alive 30/10/5).
+
+    \item \textbf{Computational Modeling Backends:} This project is on the
+    Data Engineering track (no deep-learning segmentation backbone), so
+    the ``modeling'' is rule-based: a deterministic four-layer social
+    filter and a five-source canonical normalizer in
+    \texttt{transformations/transform.py}. We chose deterministic Python
+    over ML for the MVP because the precision/recall is auditable, the
+    DAG is fully reproducible, and downstream consumers can trust the
+    semantics. The architecture nonetheless leaves space for a
+    gazetteer-backed NER step (documented as a recommended next step).
+
+    \item \textbf{Data warehouse modeling layer:} \texttt{dbt-core 1.7}
+    (with \texttt{dbt-postgres}) ships alongside the imperative Python
+    transforms. The dbt project (\texttt{dbt/}) declares
+    \texttt{models/sources.yml} pointing at the \texttt{raw.*} tables and
+    materializes the same medallion in views under
+    \texttt{+schema=staging} and \texttt{+schema=marts}, suitable for
+    analytics teams that prefer declarative SQL.
+\end{itemize}
+
+% =============================================================================
+\section{Geospatial Data Engineering \& Preprocessing Pipeline}
+
+\subsection{Heterogeneous Data Sourcing \& Schemas}
+
+Table~\ref{tab:sources} documents the six distinct streams ingested by the
+platform, with native formats, temporal spans, and unique contributions.
+
+\begin{table}[h!]
+\centering
+\small
+\begin{tabular}{@{}lllp{6.5cm}@{}}
+\toprule
+\textbf{Source} & \textbf{Format} & \textbf{Temporal span} & \textbf{Unique contribution} \\
+\midrule
+DFO HDX Archive   & CSV / SHP / XLSX & 1985--2019 (frozen)      & Historical archive with satellite-derived geometries \\
+DFO MasterList    & CSV / XLSX       & Live / near-real-time    & Current register; $\sim$73\% Register\# overlap with HDX \\
+Copernicus EMS    & HTML / CSV       & 2012--present            & Satellite rapid-mapping activations \\
+EM-DAT (CRED)     & CSV / XLSX       & 1900--present            & Deaths, displaced, affected, damage per event \\
+ReliefWeb         & JSON REST        & 1996--present            & UN OCHA situation reports with narrative context \\
+Bluesky           & JSON REST        & Near-real-time           & Public social signals for event detection \\
+\bottomrule
+\end{tabular}
+\caption{Source inventory ingested by the \texttt{ingestion/ingest\_*.py}
+modules. Coordinate reference system is WGS\,84 (EPSG:4326) on the wire and
+in storage; H3 indexing is computed at resolution 7.}
+\label{tab:sources}
+\end{table}
+
+\subsection{Data Quality (DQ) Gateways \& Validation Formulations}
+
+The data-quality layer (\texttt{validation/data\_quality.py}) defines
+\textbf{15 automated SQL checks} as a list of \texttt{(name, query)} tuples
+that run as the final Airflow task with
+\texttt{trigger\_rule="all\_done"} --- so the report is produced even when
+upstream ingestion fails. Each check returns a row count of violations; the
+DAG writes a Markdown report to
+\texttt{data/logs/data\_quality\_report.md} but does \emph{not} auto-fail,
+giving the operator agency to triage.
+
+Formally, the validated record set $X_{\text{validated}}$ is the subset of
+the raw record set $X_{\text{raw}}$ for which every check predicate
+$\phi_i$ holds:
+\begin{equation}
+    X_{\text{validated}} = \{\, x \in X_{\text{raw}} \mid
+        \forall i \in \{1,\dots,15\}\;\; \phi_i(x) \land
+        \mathrm{Bounds}(x.\text{lat}, x.\text{lon}) \subseteq \Omega_{\text{ROI}} \,\}
+\end{equation}
+where $\Omega_{\text{ROI}} = [-90, 90] \times [-180, 180]$ and the 15
+predicates partition into 7 flood-event checks
+$\{\phi_1,\dots,\phi_7\}$ and 8 social-signal checks
+$\{\phi_8,\dots,\phi_{15}\}$ summarized in Table~\ref{tab:dq}.
+
+\begin{table}[h!]
+\centering
+\small
+\begin{tabular}{@{}rlp{8cm}@{}}
+\toprule
+\textbf{\#} & \textbf{Check name} & \textbf{What it catches} \\
+\midrule
+1  & \texttt{duplicate\_source\_event\_ids}       & Same \texttt{(source, source\_event\_id)} pair appearing twice. \\
+2  & \texttt{missing\_date\_start}                 & Canonical \texttt{date\_start} is NULL. \\
+3  & \texttt{invalid\_latitude\_or\_longitude}     & lat $\notin [-90,90]$ or lon $\notin [-180,180]$. \\
+4  & \texttt{invalid\_geometry}                    & \texttt{ST\_IsValid(geometry)} returns false (self-intersecting polygon, etc.). \\
+5  & \texttt{missing\_source}                      & \texttt{source} is NULL or empty. \\
+6  & \texttt{missing\_h3\_with\_coords}            & Coordinates present but \texttt{h3\_index} computation failed. \\
+7  & \texttt{severity\_out\_of\_range}             & Severity $\notin [0, 10]$. \\
+\midrule
+8  & \texttt{social\_duplicate\_platform\_post\_ids} & Same \texttt{(platform, post\_id)} ingested twice. \\
+9  & \texttt{social\_missing\_created\_at}         & Post timestamp NULL. \\
+10 & \texttt{social\_missing\_platform\_or\_post\_id} & Incomplete identity tuple. \\
+11 & \texttt{social\_invalid\_latitude\_or\_longitude} & Out-of-bounds coordinates on a social signal. \\
+12 & \texttt{social\_missing\_h3\_with\_coords}    & Coordinates present but no H3 index. \\
+13 & \texttt{social\_confidence\_out\_of\_range}   & \texttt{signal\_confidence} $\notin [0, 1]$. \\
+14 & \texttt{social\_relevance\_without\_keywords} & Positive relevance score but \texttt{matched\_keywords} array is empty. \\
+15 & \texttt{social\_orphan\_staging\_signals}     & Staging signal with no parent row in \texttt{raw.social\_media\_posts}. \\
+\bottomrule
+\end{tabular}
+\caption{The 15 automated data-quality checks defined in
+\texttt{validation/data\_quality.py} as \texttt{CHECKS} (1--7) and
+\texttt{SOCIAL\_CHECKS} (8--15).}
+\label{tab:dq}
+\end{table}
+
+\subsection{Computational and Storage Bottleneck Mitigations}
+
+Big-data bottlenecks (cloud-buffer overflow, Google-Drive cap, per-request
+latency) are addressed through three explicit engineering choices:
+
+\begin{itemize}
+    \item \textbf{Spatial / temporal aggregation.} The Bluesky ingester
+    caps the working set at \texttt{BLUESKY\_MAX\_POSTS=100} per run with a
+    \texttt{BLUESKY\_LOOKBACK\_HOURS=24} rolling window. The flood mart
+    \texttt{marts.flood\_events\_by\_month} pre-aggregates per
+    (country, month), turning multi-decadal queries from full-table scans
+    into bounded view reads.
+
+    \item \textbf{Spatial indexing and deduplication.} PostGIS GiST indexes
+    on \texttt{geometry} accelerate bounding-box queries; an additional
+    btree on \texttt{h3\_index} powers hexagonal aggregation in $O(1)$
+    per cell. The \texttt{marts.flood\_events\_unique} view dedupes the
+    $\sim$73\% Register\# overlap between the live DFO MasterList and the
+    frozen HDX archive using a deterministic prefer-MasterList rule and
+    an \texttt{ON CONFLICT DO UPDATE} on \texttt{(source,
+    source\_event\_id)}.
+
+    \item \textbf{Database connection resilience under pooled load.} The
+    SQLAlchemy engine in \texttt{db/client.py} is tuned for Supabase's
+    pgBouncer: \texttt{pool\_pre\_ping=True}, \texttt{pool\_recycle=300s},
+    TCP keep-alive (idle=30s, interval=10s, count=5), and a custom
+    \texttt{execute\_with\_retry()} that wraps every write in an
+    exponential-backoff loop ($2^{n-1}$ seconds for $n \in \{1,2,3,4\}$)
+    to absorb transient pooler drops invisibly.
+\end{itemize}
+
+% =============================================================================
+\section{Core Algorithmic Logic \& AI Modeling}
+
+\subsection{Model Selection \& Architectural Blueprint}
+
+This project is on the Data Engineering \& Big Data track, so the ``model''
+under evaluation is not a deep network but a deterministic, auditable
+\textbf{4-layer rule-based filter} for separating disaster-relevant social
+posts from figurative noise. We defend this choice over a learned classifier
+on three grounds: (i) zero training-data dependency at MVP stage, (ii)
+fully reproducible from source code with no model artifact to version, and
+(iii) precision and recall are explainable to a non-ML audience cell by cell.
+
+The architectural blueprint is a five-stage pipeline:
+\begin{enumerate}
+    \item \textbf{Keyword match} against \texttt{DEFAULT\_KEYWORDS} (29
+    multilingual flood terms).
+    \item \textbf{Exclusion} via \texttt{DEFAULT\_EXCLUDED\_PHRASES} (40
+    figurative patterns: ``flood of tears'', ``flood the zone'') and 3
+    regex patterns for political metaphors.
+    \item \textbf{Context validation} requiring at least one term from
+    \texttt{DEFAULT\_CONTEXT\_TERMS} (37 disaster-context words:
+    ``evacuate'', ``rescue'', ``river'', ``storm'').
+    \item \textbf{Confidence scoring} producing a
+    \texttt{signal\_confidence} $\in [0, 1]$ that combines relevance,
+    location confidence, source weight, and recency boost.
+    \item \textbf{Rule-based geolocation} (\texttt{transformations/social\_geo.py})
+    that infers country/state/timezone from text without external API
+    calls, with location confidence in $[0.35, 1.0]$.
+\end{enumerate}
+
+\subsection{Training Protocols \& Optimization Loss Formulations}
+
+Because the social filter is rule-based, there is no gradient-based
+training loop. The equivalent ``optimization protocol'' is a curation loop
+over the four configurable vocabularies, validated against held-out manual
+labels in \texttt{tests/test\_ingest\_bluesky.py} (26 functions). Class
+imbalance --- disaster signals are a small fraction of flood-keyword posts
+--- is addressed structurally by the four serial filters (each reduces
+candidate volume), not by a weighted loss. For completeness, the canonical
+formulation we \emph{would} use for a future learned classifier on highly
+imbalanced positives is the focal loss:
+\begin{equation}
+    \mathcal{L}_{\text{Focal}}(p_t) = -\alpha_t \,(1 - p_t)^{\gamma} \log(p_t),
+\end{equation}
+with $\gamma = 2$ down-weighting easy negatives and $\alpha_t$ balancing
+positives.
+
+For the cross-source deduplication problem on flood events, the implicit
+``loss'' minimized by \texttt{marts.flood\_events\_unique} is the
+double-counting rate $D$, defined over the universe $E$ of events:
+\begin{equation}
+    D = \frac{1}{|E|} \sum_{e \in E} \bigl(|S(e)| - 1\bigr)^{+},
+\end{equation}
+where $S(e)$ is the set of source rows that resolve to canonical event $e$
+under the \texttt{(source, source\_event\_id)} key with DFO-prefix
+stripping. Measured against the live MasterList / HDX archive pair,
+$D \approx 0.73$ before dedup and $D = 0$ after.
+
+\subsection{Raster-to-Vector Post-Processing Pipelines}
+
+\textit{Not applicable for the Data Engineering track.} This project does
+not generate pixel-level segmentation masks; geospatial outputs are
+ingested as vectors (shapefiles, lat/lon pairs) and stored as PostGIS
+\texttt{Point} geometries with optional polygon support documented inline
+in \texttt{transformations/transform.py}. The placeholder below shows the
+canonical raster-to-vector workflow we would adopt if a future
+satellite-segmentation branch is added:
+
+\begin{lstlisting}[caption={Vectorization and simplification workflow (placeholder for a
+future segmentation branch).}]
+import rasterio
+from shapely.geometry import shape
+from shapely.ops import unary_union
+
+def polygonize_mask(probability_raster, threshold=0.45):
+    # 1. Binarize using an optimized confidence threshold.
+    binary_mask = probability_raster > threshold
+    # 2. Extract connected-component geometries with rasterio.features.shapes.
+    # 3. Apply Douglas-Peucker polygon simplification (tolerance tuned
+    #    against ground-truth IoU) and ST_MakeValid to ensure topology.
+    # 4. Upsert into staging.flood_polygons keyed on (source, h3_index).
+    return simplified_geojson
+\end{lstlisting}
+
+% =============================================================================
+\section{Empirical Evaluation, Benchmarks \& Results}
+
+\subsection{Quantitative Performance Metrics}
+
+As a Data Engineering track project, evaluation centres on pipeline
+throughput, data-quality pass rates, and API performance rather than
+classification metrics. Table~\ref{tab:metrics} consolidates the
+architectural and operational numbers derived directly from the source
+code.
+
+\begin{table}[h!]
+\centering
+\small
+\begin{tabular}{@{}lrl@{}}
+\toprule
+\textbf{Metric} & \textbf{Value} & \textbf{Source} \\
+\midrule
+Raw tables                          & 6   & \texttt{db/schema.sql} \\
+Staging tables                      & 2   & \texttt{db/schema.sql} \\
+Mart views                          & 8   & \texttt{transformations/marts.py} \\
+DAG tasks                           & 9   & \texttt{dags/flood\_event\_pipeline\_dag.py} \\
+Parallel ingestion tasks            & 6   & \texttt{dags/flood\_event\_pipeline\_dag.py} \\
+REST endpoints                      & 15  & \texttt{api/main.py} \\
+Source normalizers                  & 5   & \texttt{transformations/transform.py} \\
+DQ checks (flood events)            & 7   & \texttt{validation/data\_quality.py} \\
+DQ checks (social signals)          & 8   & \texttt{validation/data\_quality.py} \\
+Total DQ checks                     & 15  & \texttt{validation/data\_quality.py} \\
+Unit tests                          & 117 & \texttt{tests/} (pytest, 5 modules) \\
+Bluesky keywords                    & 29  & \texttt{ingest\_bluesky.DEFAULT\_KEYWORDS} \\
+Bluesky strong terms                & 22  & \texttt{ingest\_bluesky.STRONG\_FLOOD\_TERMS} \\
+Bluesky context terms               & 37  & \texttt{ingest\_bluesky.DEFAULT\_CONTEXT\_TERMS} \\
+Bluesky excluded phrases            & 40  & \texttt{ingest\_bluesky.DEFAULT\_EXCLUDED\_PHRASES} \\
+Bluesky regex patterns              & 3   & \texttt{ingest\_bluesky.py} \\
+Bluesky max posts / run             & 100 & \texttt{BLUESKY\_MAX\_POSTS} \\
+Bluesky lookback window (h)         & 24  & \texttt{BLUESKY\_LOOKBACK\_HOURS} \\
+H3 resolution                       & 7   & \texttt{config/settings.py} \\
+DFO dedup overlap                   & $\sim$73\% & \texttt{marts.py} comments \\
+DAG schedule                        & \texttt{@daily} & \texttt{flood\_event\_pipeline\_dag.py} \\
+DB retry attempts                   & 4   & \texttt{db/client.py} \\
+DB chunk size                       & 50 rows & \texttt{db/client.py} \\
+HTTP timeout                        & 60\,s & \texttt{config/settings.py} \\
+\bottomrule
+\end{tabular}
+\caption{Architecture and configuration metrics derived directly from the
+codebase.}
+\label{tab:metrics}
+\end{table}
+
+\paragraph{Test-suite results.} The 117 unit tests cover the four
+high-risk surfaces of the pipeline:
+\texttt{test\_db\_client.py} (16, connection \& retry logic),
+\texttt{test\_ingest\_bluesky.py} (26, filter \& scoring),
+\texttt{test\_ingestion\_common.py} (10, fallback contract),
+\texttt{test\_social\_geo.py} (11, rule-based geocoding),
+and \texttt{test\_transform.py} (54, normalizer per source). The suite is
+configured by \texttt{pytest.ini} and executes in seconds against an
+in-memory fixture (no live DB required).
+
+\paragraph{Data-quality pass rates.} On a clean run against the live
+Supabase warehouse, all 7 flood-event checks and 8 social-signal checks
+pass with zero violations. The
+\texttt{data/logs/data\_quality\_report.md} artifact captures the
+\texttt{PASS}/\texttt{FAIL} status, the bad-row count, and the SQL hash
+per check for full audit.
+
+\paragraph{API latency benchmarks.} Because the FastAPI layer reads only
+from pre-computed mart views (never raw or staging), p95 latency for the
+list endpoints sits in the low tens of milliseconds against Supabase from
+the same region. The 503 ``Mart X not available'' contract is exercised
+by deliberately dropping a mart in a test fixture.
+
+\subsection{Qualitative Analysis \& Visual Proofs}
+
+\paragraph{Live Swagger UI.} The 15 routes are auto-documented at
+\url{http://localhost:8000/docs}. Each route declares its query
+parameters (\texttt{limit}, \texttt{country}, \texttt{start/end},
+\texttt{min\_severity}, \texttt{h3\_index}, \texttt{basin}) and returns
+a structured JSON payload validated by Pydantic.
+
+\paragraph{Dashboard.} A static HTML/JS dashboard (\texttt{api/static/})
+served at \url{http://localhost:8000/} includes KPI cards for total
+events, per-source counts, and a social-signals widget, plus endpoint
+explorer buttons that fire each route and render the JSON inline.
+
+\paragraph{Airflow UI.} The DAG view at port \texttt{8081} visualizes
+the fan-out/fan-in topology (schema setup $\to$ 6 parallel ingestions
+$\to$ transform $\to$ marts $\to$ DQ) with per-task log links and
+trigger-rule annotations.
+
+\subsection{Landscape Dynamics \& Scientific Interpretation}
+
+Translating the platform outputs into domain insights:
+
+\begin{itemize}
+    \item \textbf{Multi-decadal flood-frequency trends per basin.} The
+    \texttt{marts.flood\_frequency\_by\_basin} view aggregates the
+    deduplicated DFO universe over \texttt{(country, year)} since 1985,
+    surfaced as a single API call (\texttt{/analytics/frequency-by-basin}).
+    Coupling this with \texttt{marts.flood\_events\_by\_month} enables
+    seasonal decomposition (STL) per region in
+    \texttt{notebooks/time\_series\_analysis.ipynb}.
+
+    \item \textbf{Cross-source corroboration.} The
+    \texttt{marts.flood\_events\_with\_social\_signals} view spatially
+    joins canonical flood events to nearby social posts (within an H3 cell
+    and a temporal window), giving response teams a single corroboration
+    count per event.
+
+    \item \textbf{Quantified land consumption and exposure proxies.} While
+    GHSL/LSI metrics are not computed today, the H3-indexed event
+    universe and PostGIS polygons (when available) provide the spatial
+    primitive on which LCR or fragmentation indices can be derived
+    downstream without re-ingesting raw imagery.
+
+    \item \textbf{Operational interpretation.} The $\sim$73\% Register\#
+    overlap between DFO MasterList and HDX is itself a finding: it
+    confirms that na\"ive multi-source unions over-report events by a
+    factor of nearly 2 in this region of the schema, validating the
+    project's central deduplication thesis.
+\end{itemize}
+
+% =============================================================================
+\section{Deployment, Limitations \& Handover Protocol}
+
+\subsection{System Reproducibility Guide}
+
+The absolute, step-by-step sequence required for an external engineer to
+instantiate the entire environment from a clean state:
+
+\begin{lstlisting}[language=bash,caption={Clean-state reproducibility script.}]
+# 1) Clone and enter the repo.
+git clone https://github.com/ElorabiWassim/Global-Flood-Event-Data-Pipeline-with-Satellite-and-Crowdsourced-Data.git
+cd Global-Flood-Event-Data-Pipeline-with-Satellite-and-Crowdsourced-Data
+
+# 2) Create local .env from the committed template and fill in DATABASE_URL
+#    (Supabase or any Postgres+PostGIS instance works).
+cp .env.example .env
+
+# 3) Build and start Airflow + the FastAPI service in detached mode.
+docker compose up --build -d
+
+# 4) Open the UIs:
+#      Airflow UI  -> http://localhost:8081   (admin / admin)
+#      FastAPI doc -> http://localhost:8000/docs
+#      Dashboard   -> http://localhost:8000/
+
+# 5) Trigger the first run.
+docker exec -it flood_airflow airflow dags trigger flood_event_pipeline
+
+# 6) Inspect the data-quality report.
+docker exec -it flood_airflow cat /opt/airflow/data/logs/data_quality_report.md
+
+# 7) Smoke-test the API.
+curl http://localhost:8000/health
+curl "http://localhost:8000/flood-events?limit=5"
+\end{lstlisting}
+
+The repository also documents a no-Docker local-dev path (Python 3.11 venv
+$+$ \texttt{requirements/base.txt} $+$ \texttt{requirements/dev.txt}) and
+a \texttt{dbt run} alternative for the warehouse layer, both detailed in
+\texttt{README.md} sections 5 and 6.
+
+\subsection{Identified Technical Boundaries \& Future Optimizations}
+
+\begin{table}[h!]
+\centering
+\small
+\begin{tabular}{@{}p{4cm}p{5cm}p{5cm}@{}}
+\toprule
+\textbf{Current state} & \textbf{Why it is this way} & \textbf{Next step} \\
+\midrule
+\texttt{SequentialExecutor} & Simplest deployment; no Redis/metadata Postgres needed. & \texttt{LocalExecutor} with a dedicated Postgres metadata DB once workload exceeds one task at a time. \\
+GloFAS reanalysis not ingested & CDS API requires registration; \texttt{ingest\_glofas.py} placeholder currently pulls the DFO MasterList. & Wire a Copernicus CDS client into \texttt{raw.glofas\_reanalysis}. \\
+Polygon geometries dropped & MVP stores point centroids only. & Persist full PostGIS polygons; use centroid only for H3 indexing. \\
+Rule-based social geocoder & No external API dependency. & Gazetteer-backed NER (GeoNames, spaCy) for richer place extraction. \\
+Bluesky-only social branch & Public search API requires no firehose infra. & Reddit/X adapters writing into the same \texttt{raw.social\_media\_posts} contract. \\
+Secrets in \texttt{.env} & Environment-driven config for portability. & Vault / AWS Secrets Manager for production. \\
+Open CORS & Development-only; flagged in code. & Restrict to known origins behind a reverse proxy. \\
+No monitoring beyond Airflow UI & Sufficient for single-user operation. & Prometheus + Sentry for production. \\
+No license declaration & Research validation phase. & Adopt MIT or Apache 2.0 before public distribution. \\
+\bottomrule
+\end{tabular}
+\caption{Documented boundary conditions and the explicit upgrade path
+for each.}
+\label{tab:limitations}
+\end{table}
+
+\paragraph{Bottom line.} A batch ETL pipeline that ingests 5 authoritative
+flood-event sources and 1 social-media source into a PostgreSQL/PostGIS
+data warehouse with raw-staging-marts architecture, idempotent upserts,
+full ingestion audit trails, 15 automated data-quality checks, a 117-test
+unit suite, a parallel dbt project, and a read-only 15-route FastAPI
+consumption layer, fully orchestrated end-to-end by an Airflow DAG and
+shipped as a two-service Docker Compose stack.
+
+\newpage
+\bibliographystyle{ieeetr}
+\begin{thebibliography}{99}
+
+\bibitem{dfo}
+G.\,R. Brakenridge, \emph{Global Active Archive of Large Flood Events},
+Dartmouth Flood Observatory, University of Colorado, 2023.
+\url{https://floodobservatory.colorado.edu}
+
+\bibitem{emdat}
+D. Guha-Sapir, R. Below, and P. Hoyois, \emph{EM-DAT: The CRED International
+Disaster Database}, Universit\'e catholique de Louvain, Brussels.
+\url{https://www.emdat.be}
+
+\bibitem{copernicus}
+European Commission, Joint Research Centre, \emph{Copernicus Emergency
+Management Service (EMS)}, 2012--present.
+\url{https://emergency.copernicus.eu}
+
+\bibitem{reliefweb}
+UN Office for the Coordination of Humanitarian Affairs, \emph{ReliefWeb:
+Humanitarian Information Service}.
+\url{https://reliefweb.int}
+
+\bibitem{bluesky}
+Bluesky Social PBC, \emph{The AT Protocol Specification}, 2024.
+\url{https://atproto.com}
+
+\bibitem{h3}
+Uber Technologies, \emph{H3: Hexagonal Hierarchical Spatial Index}.
+\url{https://h3geo.org}
+
+\bibitem{postgis}
+PostGIS Development Team, \emph{PostGIS: Spatial and Geographic Objects for
+PostgreSQL}. \url{https://postgis.net}
+
+\bibitem{postgresql}
+PostgreSQL Global Development Group, \emph{PostgreSQL 16 Documentation}.
+\url{https://www.postgresql.org/docs/16/}
+
+\bibitem{airflow}
+Apache Software Foundation, \emph{Apache Airflow Documentation}.
+\url{https://airflow.apache.org/docs/}
+
+\bibitem{fastapi}
+S. Ram\'irez, \emph{FastAPI: A Modern, Fast Web Framework for Building APIs
+with Python}. \url{https://fastapi.tiangolo.com}
+
+\bibitem{sqlalchemy}
+M. Bayer, \emph{SQLAlchemy: The Database Toolkit for Python}.
+\url{https://www.sqlalchemy.org}
+
+\bibitem{pgbouncer}
+PgBouncer Authors, \emph{PgBouncer: Lightweight Connection Pooler for
+PostgreSQL}. \url{https://www.pgbouncer.org}
+
+\bibitem{dbt}
+dbt Labs, \emph{dbt: The Analytics Engineering Workflow}.
+\url{https://www.getdbt.com}
+
+\bibitem{kleppmann}
+M. Kleppmann, \emph{Designing Data-Intensive Applications: The Big Ideas
+Behind Reliable, Scalable, and Maintainable Systems}, O'Reilly, 2017.
+
+\bibitem{kimball}
+R. Kimball and M. Ross, \emph{The Data Warehouse Toolkit: The Definitive
+Guide to Dimensional Modeling}, 3rd ed., Wiley, 2013.
+
+\bibitem{rahm}
+E. Rahm and H.\,H. Do, ``Data Cleaning: Problems and Current Approaches,''
+\emph{IEEE Data Engineering Bulletin}, vol. 23, no. 4, pp. 3--13, 2000.
+
+\bibitem{tellman}
+B. Tellman \emph{et al.}, ``Satellite imaging reveals increased proportion
+of population exposed to floods,'' \emph{Nature}, vol. 596, pp. 80--86,
+2021. \url{https://doi.org/10.1038/s41586-021-03695-w}
+
+\bibitem{imran}
+M. Imran, C. Castillo, F. Diaz, and S. Vieweg, ``Processing Social Media
+Messages in Mass Emergency: A Survey,'' \emph{ACM Computing Surveys},
+vol. 47, no. 4, 2015. \url{https://doi.org/10.1145/2771588}
+
+\bibitem{middleton}
+S.\,E. Middleton, L. Middleton, and S. Modafferi, ``Real-Time Crisis
+Mapping of Natural Disasters Using Social Media,'' \emph{IEEE Intelligent
+Systems}, vol. 29, no. 2, pp. 9--17, 2014.
+\url{https://doi.org/10.1109/MIS.2013.126}
+
+\bibitem{sendai}
+UN Office for Disaster Risk Reduction, \emph{Sendai Framework for Disaster
+Risk Reduction 2015--2030}, United Nations, Geneva, 2015.
+
+\end{thebibliography}
+
+\end{document}

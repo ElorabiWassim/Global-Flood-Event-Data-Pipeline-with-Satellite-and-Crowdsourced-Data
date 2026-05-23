@@ -15389,3 +15389,40 @@ File Path                                      PID    Runtime      # DAGs    # E
 ---------------------------------------------  -----  ---------  --------  ----------  --------------  -------------------
 /opt/airflow/dags/flood_event_pipeline_dag.py                           1           0  0.21s           2026-05-05T23:44:54
 ================================================================================
+[2026-05-17T11:28:32.632+0000] {manager.py:470} INFO - Processing files using up to 1 processes at a time 
+[2026-05-17T11:28:32.633+0000] {manager.py:471} INFO - Process each file at most once every 30 seconds
+[2026-05-17T11:28:32.634+0000] {manager.py:472} INFO - Checking for new files in /opt/airflow/dags every 300 seconds
+[2026-05-17T11:28:32.635+0000] {manager.py:737} INFO - Searching for files in /opt/airflow/dags
+[2026-05-17T11:28:32.668+0000] {manager.py:740} INFO - There are 1 files in /opt/airflow/dags
+[2026-05-17T11:28:32.941+0000] {manager.py:878} INFO - 
+================================================================================
+DAG File Processing Stats
+
+File Path                                      PID    Runtime      # DAGs    # Errors  Last Runtime    Last Run
+---------------------------------------------  -----  ---------  --------  ----------  --------------  -------------------
+/opt/airflow/dags/flood_event_pipeline_dag.py                           1           0  0.21s           2026-05-17T11:28:32
+================================================================================
+[2026-05-17T11:29:04.294+0000] {manager.py:878} INFO - 
+================================================================================
+DAG File Processing Stats
+
+File Path                                      PID    Runtime      # DAGs    # Errors  Last Runtime    Last Run
+---------------------------------------------  -----  ---------  --------  ----------  --------------  -------------------
+/opt/airflow/dags/flood_event_pipeline_dag.py                           1           0  0.40s           2026-05-17T11:29:04
+================================================================================
+[2026-05-17T11:29:35.326+0000] {manager.py:878} INFO - 
+================================================================================
+DAG File Processing Stats
+
+File Path                                      PID    Runtime      # DAGs    # Errors  Last Runtime    Last Run
+---------------------------------------------  -----  ---------  --------  ----------  --------------  -------------------
+/opt/airflow/dags/flood_event_pipeline_dag.py                           1           0  0.11s           2026-05-17T11:29:35
+================================================================================
+[2026-05-17T11:30:05.668+0000] {manager.py:878} INFO - 
+================================================================================
+DAG File Processing Stats
+
+File Path                                      PID    Runtime      # DAGs    # Errors  Last Runtime    Last Run
+---------------------------------------------  -----  ---------  --------  ----------  --------------  -------------------
+/opt/airflow/dags/flood_event_pipeline_dag.py                           1           0  0.20s           2026-05-17T11:30:05
+================================================================================

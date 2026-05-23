@@ -1,246 +1,455 @@
 # Global Flood Event Data Pipeline
 
-An automated, reproducible data pipeline that aggregates historical and
-near-real-time flood-event data from satellite observations, government
-disaster databases, humanitarian news feeds, and public social-media flood
-signals into a single, unified, analysis-ready PostGIS / H3 database, exposed
-through a FastAPI service and an interactive dashboard.
+An end-to-end, reproducible data pipeline that aggregates historical and
+near-real-time flood-event data from **satellite observations**, **government
+disaster databases**, **humanitarian news feeds**, and **public social-media
+flood signals** into a single, unified, analysis-ready **PostgreSQL / PostGIS +
+H3** data warehouse, exposed through a **FastAPI** service and an interactive
+dashboard, orchestrated by **Apache Airflow** and modeled with **dbt**.
 
-## 1. Architecture
+> **Repository**: <https://github.com/ElorabiWassim/Global-Flood-Event-Data-Pipeline-with-Satellite-and-Crowdsourced-Data>
+
+---
+
+## Table of Contents
+
+1. [What you get](#1-what-you-get)
+2. [Architecture](#2-architecture)
+3. [Repository layout](#3-repository-layout)
+4. [Prerequisites](#4-prerequisites)
+5. [Quick start (Docker, recommended)](#5-quick-start-docker-recommended)
+6. [Local development setup (no Docker)](#6-local-development-setup-no-docker)
+7. [Configuration reference](#7-configuration-reference)
+8. [Running the pipeline](#8-running-the-pipeline)
+9. [dbt warehouse layer](#9-dbt-warehouse-layer)
+10. [API reference](#10-api-reference)
+11. [Testing & data quality](#11-testing--data-quality)
+12. [Analytical outputs (notebooks)](#12-analytical-outputs-notebooks)
+13. [Troubleshooting](#13-troubleshooting)
+14. [Known limitations](#14-known-limitations)
+15. [License](#15-license)
+
+---
+
+## 1. What you get
+
+| Layer                    | Count | Where                                                                |
+| ------------------------ | ----: | -------------------------------------------------------------------- |
+| Raw data sources         |     6 | `ingestion/ingest_*.py`                                              |
+| Raw tables (`raw.*`)     |     6 | `db/schema.sql`                                                      |
+| Staging tables           |     2 | `staging.flood_events`, `staging.social_flood_signals`               |
+| Mart views               |     8 | `transformations/marts.py` (+ dbt project in `dbt/`)                 |
+| Airflow DAG tasks        |     9 | `dags/flood_event_pipeline_dag.py`                                   |
+| REST endpoints           |    15 | `api/main.py`                                                        |
+| Data-quality checks      |    15 | `validation/data_quality.py` (7 flood + 8 social)                    |
+| Unit tests               |   117 | `tests/`                                                             |
+| Source normalizers       |     5 | `transformations/transform.py`                                       |
+
+---
+
+## 2. Architecture
 
 ```
                            +--------------------------+
                            |  Apache Airflow (DAG)    |
                            |  flood_event_pipeline    |
                            +--------------------------+
-                                    |
-        +---------+--------------+-------+----------+--------------+----------+
-        |         |              |       |          |              |          |
-   Dartmouth_FO  Dartmouth_      Copernicus EMS   EM-DAT      ReliefWeb API  Bluesky
-   (HDX, frozen) MasterList     (Rapid Mapping)   (CRED HDX)                 search API
-                 (live, DFO)
-        |         |              |       |          |              |          |
-        v         v              v       v          v              v          v
+                                       |
+   +---------+--------------+--------+-+--------+--------------+----------+
+   |         |              |        |          |              |          |
+Dartmouth_FO Dartmouth_  Copernicus EMS      EM-DAT       ReliefWeb     Bluesky
+(HDX, frozen) MasterList (Rapid Mapping)   (CRED HDX)      API          search API
+   |         |              |        |          |              |          |
+   v         v              v        v          v              v          v
    data/raw/<source>/  (CSV / XLSX / JSON / SHP snapshots + .meta.json sidecars)
-        \____________________  \_____  ____________________/                 |
-                              \      \/                                      |
-                          INSERT into raw.<source>_events                    |
-                          raw.social_media_posts  <-------------------------/
+        \____________________  \_____  ____________________/             |
+                              \      \/                                  |
+                       INSERT into raw.<source>_events                   |
+                       raw.social_media_posts <-------------------------/
                                   |
                   transformations/transform.py
                      |                            |
                      v                            v
-        staging.flood_events              staging.social_flood_signals
-        (canonical, H3 + PostGIS)         (filtered social observations)
+        staging.flood_events           staging.social_flood_signals
+        (canonical, H3 + PostGIS)      (filtered social observations)
                                   |
-                  transformations/marts.py
+                  transformations/marts.py   (or:  dbt run)
                                   |
                                   v
-              marts.flood_events           (raw projection, audit)
-              marts.flood_events_unique    (deduped, canonical for analytics)
-              marts.flood_events_by_*      (rollups built on _unique)
-              marts.social_flood_signals
-              marts.social_signals_by_country_day
+              marts.flood_events             marts.flood_events_unique
+              marts.flood_events_by_region   marts.flood_events_by_month
+              marts.flood_events_by_source   marts.flood_frequency_by_basin
+              marts.social_flood_signals     marts.social_signals_by_country_day
               marts.flood_events_with_social_signals
                                   |
                                   v
                           FastAPI + dashboard (api/main.py)
 ```
 
-### Schemas
+### Medallion schemas
 
-| Schema    | Purpose                                                        |
-|-----------|----------------------------------------------------------------|
-| `raw`     | Untouched ingestion. One JSONB row per source row / social post + audit log. |
-| `staging` | Canonical unified `flood_events` table and normalized `social_flood_signals`. |
-| `marts`   | API-ready views built on top of `staging`, including social rollups. |
+| Schema    | Purpose                                                                          |
+| --------- | -------------------------------------------------------------------------------- |
+| `raw`     | Untouched ingestion. One JSONB row per source row / social post + audit log.     |
+| `staging` | Canonical unified `flood_events` table and normalized `social_flood_signals`.    |
+| `marts`   | API-ready views built on top of `staging`, including social rollups & joins.     |
 
-The full DDL lives in [`db/schema.sql`](./db/schema.sql) and is applied
-idempotently by the pipeline's first task.
+Full DDL: [`db/schema.sql`](./db/schema.sql) (applied idempotently by the DAG's
+first task).
 
-## 2. Repository layout
+---
+
+## 3. Repository layout
 
 ```
 .
-├── api/                                       # FastAPI service
+├── api/                          # FastAPI service (15 routes)
 │   ├── main.py
-│   └── Dockerfile
-├── airflow/                                   # Airflow runtime state only
-│   ├── logs/                                  #   (logs + plugins; DAGs live
-│   └── plugins/                               #    at root ./dags)
-├── config/                                    # env-driven settings
+│   ├── Dockerfile
+│   └── static/                   # interactive dashboard assets
+├── airflow/                      # Airflow runtime state
+│   ├── Dockerfile                #   custom image (pandas, h3, dbt, SQLAlchemy)
+│   ├── logs/                     #   .gitignored
+│   └── plugins/
+├── config/
 │   ├── __init__.py
-│   └── settings.py
-├── dags/                                      # Airflow DAGs
+│   └── settings.py               # env-driven configuration
+├── dags/
 │   └── flood_event_pipeline_dag.py
 ├── data/
-│   ├── raw/<source>/                          # downloaded files + .meta.json
-│   ├── processed/
+│   ├── raw/<source>/             # ingested files + .meta.json sidecars
+│   ├── processed/                # .gitignored
 │   └── logs/data_quality_report.md
-├── db/                                        # database layer
+├── db/
 │   ├── __init__.py
-│   ├── client.py                              # SQLAlchemy engine + helpers
-│   └── schema.sql                             # canonical DDL
-├── dbt/                                       # optional dbt project
-├── docs/data_sources.md
-├── ingestion/                                 # raw-load layer
-│   ├── __init__.py
+│   ├── client.py                 # SQLAlchemy engine + retry helpers
+│   └── schema.sql                # canonical PostGIS DDL
+├── dbt/                          # dbt project (staging + marts)
+│   ├── dbt_project.yml
+│   ├── profiles.yml
+│   └── models/
+│       ├── sources.yml
+│       ├── staging/stg_dfo.sql
+│       └── marts/flood_events.sql
+├── docs/
+│   ├── data_sources.md
+│   ├── project_status.md
+│   ├── project_status.pdf
+│   └── social_media_ingestion/
+├── ingestion/                    # raw-load layer (one module per source)
 │   ├── common.py
-│   ├── ingest_dartmouth.py            # DFO HDX shapefile (frozen 2019)
-│   ├── ingest_glofas.py               # legacy filename; pulls DFO live
-│   │                                  #   MasterList (Dartmouth_MasterList).
-│   │                                  #   Real GloFAS reanalysis would
-│   │                                  #   feed a separate raw table.
+│   ├── ingest_bluesky.py
 │   ├── ingest_copernicus_ems.py
+│   ├── ingest_dartmouth.py
 │   ├── ingest_emdat.py
-│   ├── ingest_reliefweb.py
-│   └── ingest_bluesky.py             # public Bluesky flood-signal ingestion
-├── requirements/base.txt
-├── scripts/                                   # one-off utility scripts
+│   ├── ingest_glofas.py
+│   └── ingest_reliefweb.py
+├── notebooks/
+│   └── time_series_analysis.ipynb
+├── requirements/
+│   ├── base.txt
+│   ├── dev.txt
+│   └── notebooks.txt
+├── scripts/
 │   └── _make_status_pdf.py
-├── transformations/                           # raw -> staging -> marts
-│   ├── __init__.py
+├── tests/                        # 117 unit tests (pytest)
+│   ├── conftest.py
+│   ├── test_db_client.py
+│   ├── test_ingest_bluesky.py
+│   ├── test_ingestion_common.py
+│   ├── test_social_geo.py
+│   └── test_transform.py
+├── transformations/              # raw -> staging -> marts
 │   ├── transform.py
-│   ├── social_geo.py                 # lightweight place/country inference
+│   ├── social_geo.py
 │   └── marts.py
-├── validation/                                # data-quality layer
-│   ├── __init__.py
-│   └── data_quality.py
+├── validation/
+│   └── data_quality.py           # 15 automated checks
+├── .env.example                  # template — copy to .env
+├── .gitignore
 ├── docker-compose.yml
-└── .env                                       # NOT committed in production
+├── pytest.ini
+└── README.md
 ```
 
-## 3. Configuration
+---
 
-All credentials and tunables come from `.env`:
+## 4. Prerequisites
 
-| Variable             | Purpose                                              |
-|----------------------|------------------------------------------------------|
-| `DATABASE_URL`       | Full SQLAlchemy URL (preferred).                     |
-| `POSTGRES_*`         | Fallback parts (host, user, password, port, db).     |
-| `H3_RESOLUTION`      | H3 cell resolution used by transform.py (default 7). |
-| `API_HOST`/`API_PORT`| FastAPI bind config.                                 |
-| `RELIEFWEB_APPNAME`  | App identifier sent to the public ReliefWeb API.     |
-| `EMDAT_DOWNLOAD_URL` | Optional signed URL for EM-DAT bulk export.          |
-| `CDS_API_URL`/`CDS_API_KEY` | Optional Copernicus CDS credentials. Real GloFAS reanalysis is **not yet wired** — these are kept as a placeholder for a future ingester. |
-| `ENABLE_SOCIAL_MEDIA_INGESTION` | Enables the optional Bluesky task inside the Airflow DAG. |
-| `BLUESKY_HANDLE` / `BLUESKY_APP_PASSWORD` | Optional Bluesky App Password credentials. When set, search uses the authenticated `bsky.social` PDS endpoint instead of the public AppView. |
-| `BLUESKY_MAX_POSTS` | Maximum normalized posts to upsert per Bluesky ingestion run. |
-| `BLUESKY_PER_QUERY_LIMIT` | Per-keyword search page size sent to Bluesky. |
-| `BLUESKY_LOOKBACK_HOURS` | Rolling time window for scheduled Bluesky ingestion runs. |
+| Tool                  | Minimum version | Notes                                                |
+| --------------------- | --------------- | ---------------------------------------------------- |
+| Docker Desktop        | 24.x            | Required for the Docker quick-start path             |
+| Docker Compose plugin | v2.x            | Bundled with modern Docker Desktop                   |
+| Python                | 3.11            | Required for the local-dev path                      |
+| Git                   | 2.30+           |                                                      |
+| (Optional) PostgreSQL | 14+ with PostGIS 3.x | Only if you skip the Supabase/managed-DB option |
 
-## 4. Running with Docker
+You also need a PostgreSQL database with the **PostGIS** extension enabled.
+Any of the following works:
+
+- A free [Supabase](https://supabase.com) project (PostGIS is pre-installed)
+- A local PostgreSQL 14+ with `CREATE EXTENSION postgis;`
+- A managed Postgres (RDS, Cloud SQL, Neon, Crunchy) with PostGIS
+
+---
+
+## 5. Quick start (Docker, recommended)
+
+These commands take a clean machine to a running pipeline + API in **under
+five minutes** (assuming a reachable Postgres URL).
 
 ```bash
-# 1) Build and start everything
-docker compose up --build
+# 1) Clone the repository
+git clone https://github.com/ElorabiWassim/Global-Flood-Event-Data-Pipeline-with-Satellite-and-Crowdsourced-Data.git
+cd Global-Flood-Event-Data-Pipeline-with-Satellite-and-Crowdsourced-Data
 
-# 2) Open Airflow UI
-#    http://localhost:8081  (admin / admin)
+# 2) Create your local .env from the template, then edit it
+cp .env.example .env
+#   Windows PowerShell: Copy-Item .env.example .env
+#
+#   Edit .env and set at minimum:
+#     - DATABASE_URL (or POSTGRES_HOST/USER/PASSWORD/DB)
+#     - BLUESKY_HANDLE / BLUESKY_APP_PASSWORD   (optional)
 
-# 3) Open the API
-#    http://localhost:8000/docs
+# 3) Build and start Airflow + the FastAPI service
+docker compose up --build -d
+
+# 4) Watch logs until "airflow standalone | Webserver ... started"
+docker compose logs -f airflow
+
+# 5) Open the two web UIs
+#    Airflow UI  -> http://localhost:8081     (user: admin, password: admin)
+#    FastAPI doc -> http://localhost:8000/docs
+#    Dashboard   -> http://localhost:8000/
 ```
 
-The first start of the airflow container will:
-- run `airflow db migrate`
-- create the `admin` user (idempotent)
-- install pipeline dependencies declared in `_PIP_ADDITIONAL_REQUIREMENTS`
-- launch `airflow standalone` (web + scheduler in one process)
+The first start of the `airflow` container will:
 
-### Triggering the DAG
+- Run `airflow db migrate` to initialize the metadata DB
+- Create the `admin` Airflow user idempotently
+- Install pipeline dependencies (pandas, h3, dbt, SQLAlchemy, …)
+- Launch `airflow standalone` (web + scheduler in one process)
 
-In the Airflow UI, locate **`flood_event_pipeline`**, toggle it on, then
-click the ▶ "Trigger DAG" button. The DAG is also scheduled `@daily`.
+### Trigger your first pipeline run
 
-CLI alternative:
+In the Airflow UI:
+
+1. Locate the **`flood_event_pipeline`** DAG
+2. Toggle it **ON**
+3. Click the ▶ **Trigger DAG** button
+
+…or from the CLI:
 
 ```bash
 docker exec -it flood_airflow airflow dags trigger flood_event_pipeline
 ```
 
-### Running only the API + social pipeline with Docker
+The DAG runs `Schema setup → 6 parallel ingestions → Transform → Build marts
+→ DQ check` and finishes by writing
+[`data/logs/data_quality_report.md`](./data/logs/data_quality_report.md).
 
-If I only need to verify the social-media integration and dashboard before a
-push, I can run the lightweight API image and execute ingestion/transform as
-one-off containers:
+### Smoke-test the API
 
 ```bash
-# Build and start the FastAPI service
-docker compose build api
-docker compose up -d --no-deps api
-
-# Ingest public Bluesky flood posts into raw.social_media_posts
-docker run --rm --env-file .env -v "${PWD}:/app" -w /app -e PYTHONPATH=/app \
-  global-flood-event-data-pipeline-with-satellite-and-crowdsourced-data-api \
-  python -m ingestion.ingest_bluesky
-
-# Transform social posts and refresh marts
-docker run --rm --env-file .env -v "${PWD}:/app" -w /app -e PYTHONPATH=/app \
-  global-flood-event-data-pipeline-with-satellite-and-crowdsourced-data-api \
-  python -c "from transformations.transform import transform_social_media_posts; from transformations.marts import refresh_marts; print(transform_social_media_posts()); refresh_marts()"
+curl http://localhost:8000/health
+curl "http://localhost:8000/flood-events?limit=5"
+curl "http://localhost:8000/flood-events/by-time?start=2020-01-01&end=2020-12-31"
 ```
 
-## 5. Running locally (without Docker)
+### Stopping & cleaning up
 
 ```bash
-# from project root
-python -m venv .venv && source .venv/bin/activate         # or .venv\Scripts\activate on Windows
-pip install -r requirements/base.txt
+docker compose down                # stop containers, keep volumes
+docker compose down -v --rmi local # nuke containers, images, volumes
+```
 
-# 1) Create schemas + tables
+---
+
+## 6. Local development setup (no Docker)
+
+Use this path if you want to iterate on Python code without rebuilding the
+image, or if Docker is unavailable.
+
+```bash
+# 1) Clone the repo and cd in
+git clone https://github.com/ElorabiWassim/Global-Flood-Event-Data-Pipeline-with-Satellite-and-Crowdsourced-Data.git
+cd Global-Flood-Event-Data-Pipeline-with-Satellite-and-Crowdsourced-Data
+
+# 2) Create a Python 3.11 virtualenv
+python -m venv .venv
+
+#    Activate it
+source .venv/bin/activate          # macOS / Linux
+.venv\Scripts\Activate.ps1         # Windows PowerShell
+
+# 3) Install dependencies
+pip install --upgrade pip
+pip install -r requirements/base.txt
+pip install -r requirements/dev.txt          # pytest + tooling
+
+# 4) Configure your environment
+cp .env.example .env                          # then edit it
+
+# 5) Apply the canonical schema to your database
 python -c "from db.client import apply_schema_sql; apply_schema_sql()"
 
-# 2) Run a single source (or all)
+# 6) Run one or more ingestion modules
 python -m ingestion.ingest_dartmouth
 python -m ingestion.ingest_reliefweb
-python -m ingestion.ingest_bluesky
-# ...
+python -m ingestion.ingest_emdat
+python -m ingestion.ingest_copernicus_ems
+python -m ingestion.ingest_glofas             # pulls DFO MasterList
+python -m ingestion.ingest_bluesky            # optional
 
-# 3) Transform raw -> staging
+# 7) Normalize raw -> staging
 python -m transformations.transform
 
-# 4) Build marts
+# 8) Build/refresh marts
 python -m transformations.marts
 
-# 5) Run DQ checks (writes data/logs/data_quality_report.md)
+# 9) Run the 15 data-quality checks
 python -m validation.data_quality
 
-# 6) Serve the API
+# 10) Serve the API
 uvicorn api.main:app --reload --host 0.0.0.0 --port 8000
 ```
 
-## 6. Querying the database
+Open <http://localhost:8000/docs> for Swagger UI and <http://localhost:8000/>
+for the dashboard.
 
-Connect with any Postgres client to the URL in `.env`. Quick smoke checks:
+---
 
-```sql
--- counts per source
-SELECT source, COUNT(*) FROM staging.flood_events GROUP BY source;
+## 7. Configuration reference
 
--- top 10 deadliest events
-SELECT source, country, date_start, deaths
-FROM marts.flood_events
-ORDER BY deaths DESC NULLS LAST
-LIMIT 10;
+All credentials and tunables are loaded from `.env` via `python-dotenv` in
+[`config/settings.py`](./config/settings.py). Copy [`.env.example`](./.env.example)
+to `.env` and adjust:
 
--- frequency by basin (country proxy) since 2010
-SELECT * FROM marts.flood_frequency_by_basin
-WHERE year >= 2010
-ORDER BY event_count DESC
-LIMIT 20;
+| Variable                            | Required | Default                              | Purpose                                           |
+| ----------------------------------- | :------: | ------------------------------------ | ------------------------------------------------- |
+| `DATABASE_URL`                      |    *     | *(built from POSTGRES_*)*            | Full SQLAlchemy URL (preferred).                  |
+| `POSTGRES_HOST`                     |    *     | `localhost`                          | Used when `DATABASE_URL` is unset.                |
+| `POSTGRES_PORT`                     |    *     | `5432`                               |                                                   |
+| `POSTGRES_DB`                       |    *     | `postgres`                           |                                                   |
+| `POSTGRES_USER`                     |    *     | `postgres`                           |                                                   |
+| `POSTGRES_PASSWORD`                 |    *     | `postgres`                           |                                                   |
+| `API_HOST`                          |          | `0.0.0.0`                            | FastAPI bind host                                 |
+| `API_PORT`                          |          | `8000`                               | FastAPI bind port                                 |
+| `H3_RESOLUTION`                     |          | `7`                                  | H3 cell resolution (≈ 5 km edge length)           |
+| `HTTP_TIMEOUT`                      |          | `60`                                 | Per-request timeout (s) for ingestion modules     |
+| `RELIEFWEB_APPNAME`                 |          | `ai-students-flood-project-...`      | App identifier sent to the public ReliefWeb API   |
+| `EMDAT_DOWNLOAD_URL`                |          | —                                    | Signed URL for EM-DAT bulk export (optional)      |
+| `COPERNICUS_EMS_FEED_URL`           |          | —                                    | Override for the bundled `activations.csv`        |
+| `CDS_API_URL` / `CDS_API_KEY`       |          | —                                    | Copernicus CDS credentials (future GloFAS branch) |
+| `AIRFLOW_UID`                       |          | `50000`                              | UID Airflow processes run as inside the container |
+| `ENABLE_SOCIAL_MEDIA_INGESTION`     |          | `true`                               | Toggles the Bluesky task inside the DAG           |
+| `BLUESKY_HANDLE`                    |          | —                                    | Optional Bluesky handle for authenticated search  |
+| `BLUESKY_APP_PASSWORD`              |          | —                                    | Optional Bluesky App Password                     |
+| `BLUESKY_MAX_POSTS`                 |          | `100`                                | Max normalized posts per run                      |
+| `BLUESKY_PER_QUERY_LIMIT`           |          | `25`                                 | Per-keyword search page size                      |
+| `BLUESKY_LOOKBACK_HOURS`            |          | `24`                                 | Rolling window for scheduled runs                 |
 
--- social-media flood signal counts
-SELECT COUNT(*) FROM raw.social_media_posts;
-SELECT platform, COUNT(*) FROM staging.social_flood_signals GROUP BY platform;
-SELECT * FROM marts.social_signals_by_country_day
-ORDER BY signal_date DESC, signal_count DESC
-LIMIT 20;
+\* At least one of `DATABASE_URL` or the `POSTGRES_*` quartet is required.
+
+> ⚠️ **Never commit `.env`.** The `.gitignore` excludes it by default. If you
+> ever pushed a real `.env`, **rotate every credential it contains** — older
+> commits keep the secrets even after deletion.
+
+---
+
+## 8. Running the pipeline
+
+### DAG task graph
+
+```
+              schema_setup
+                  │
+   ┌──────┬──────┬┴───────┬──────────┬─────────┐
+   ▼      ▼      ▼        ▼          ▼         ▼
+dartmouth glofas copernicus_ems emdat reliefweb bluesky        (6 in parallel)
+   └──────┴──────┴────┬───┴──────────┴─────────┘
+                      ▼
+                  transform
+                      ▼
+                build_marts
+                      ▼
+                   dq_check        (trigger_rule="all_done")
 ```
 
-## 7. Querying the API
+### Manual ad-hoc invocations
 
-Once the FastAPI container is up:
+```bash
+# Replay a single source from its cached raw snapshot:
+docker exec -it flood_airflow python -m ingestion.ingest_dartmouth
+
+# Re-build marts only (after editing transformations/marts.py):
+docker exec -it flood_airflow python -m transformations.marts
+
+# Run only the DQ task and view the report:
+docker exec -it flood_airflow python -m validation.data_quality
+docker exec -it flood_airflow cat /opt/airflow/data/logs/data_quality_report.md
+```
+
+---
+
+## 9. dbt warehouse layer
+
+The repository includes a parallel **dbt** project that materializes the same
+medallion architecture as views, suitable for analytics teams that prefer dbt
+to imperative Python transforms.
+
+```bash
+# Inside the airflow container (dbt is pre-installed):
+docker exec -it flood_airflow bash -lc "cd /opt/airflow/dbt && dbt run --profiles-dir ."
+docker exec -it flood_airflow bash -lc "cd /opt/airflow/dbt && dbt test --profiles-dir ."
+docker exec -it flood_airflow bash -lc "cd /opt/airflow/dbt && dbt docs generate --profiles-dir . && dbt docs serve --profiles-dir ."
+```
+
+Project layout:
+
+```
+dbt/
+├── dbt_project.yml          # name=flood_pipeline, profile=flood_pipeline
+├── profiles.yml             # reads DATABASE_URL from env
+└── models/
+    ├── sources.yml          # raw.* source definitions
+    ├── staging/             # +schema=staging, materialized=view
+    │   └── stg_dfo.sql
+    └── marts/               # +schema=marts, materialized=view
+        └── flood_events.sql
+```
+
+> The Python `transformations/marts.py` and the dbt project both write into
+> the `marts` schema. In production, pick one as the source of truth; today
+> the Airflow DAG calls the Python version for deterministic refreshes.
+
+---
+
+## 10. API reference
+
+The FastAPI service reads **only** from mart views (never raw or staging), so
+responses are fast, consistent across endpoints, and degrade safely (HTTP 503
+if a mart is missing).
+
+| #  | Method | Path                                            | Tag       |
+| -: | ------ | ----------------------------------------------- | --------- |
+|  1 | GET    | `/`                                             | dashboard |
+|  2 | GET    | `/api`                                          | meta      |
+|  3 | GET    | `/health`                                       | meta      |
+|  4 | GET    | `/flood-events`                                 | events    |
+|  5 | GET    | `/flood-events/with-social-signals`             | events    |
+|  6 | GET    | `/social-signals`                               | social    |
+|  7 | GET    | `/flood-events/by-region`                       | events    |
+|  8 | GET    | `/flood-events/by-time`                         | events    |
+|  9 | GET    | `/flood-events/by-severity`                     | events    |
+| 10 | GET    | `/flood-events/by-h3`                           | events    |
+| 11 | GET    | `/analytics/frequency-by-basin`                 | analytics |
+| 12 | GET    | `/analytics/by-month`                           | analytics |
+| 13 | GET    | `/analytics/by-source`                          | analytics |
+| 14 | GET    | `/analytics/social-signals/by-platform`         | analytics |
+| 15 | GET    | `/analytics/social-signals/by-country-day`      | analytics |
+
+Examples:
 
 ```bash
 curl http://localhost:8000/health
@@ -252,71 +461,125 @@ curl "http://localhost:8000/flood-events/by-h3?h3_index=87283472bffffff"
 curl "http://localhost:8000/flood-events/with-social-signals?limit=5"
 curl "http://localhost:8000/social-signals?limit=5"
 curl "http://localhost:8000/analytics/frequency-by-basin?basin=Vietnam"
+curl "http://localhost:8000/analytics/by-month"
+curl "http://localhost:8000/analytics/by-source"
 curl "http://localhost:8000/analytics/social-signals/by-platform"
 curl "http://localhost:8000/analytics/social-signals/by-country-day?limit=20"
 ```
 
 Interactive Swagger UI: <http://localhost:8000/docs>.
 
-Interactive dashboard: <http://localhost:8000/>. The dashboard includes a
-social-signals KPI card and endpoint explorer buttons for the social routes.
+---
 
-## 8. Data sources
+## 11. Testing & data quality
 
-See [`docs/data_sources.md`](./docs/data_sources.md) for the full list of
-source URLs, ingestion mechanisms, license / access constraints, and
-fallback behaviour.
+### Unit tests (pytest)
 
-The social-media branch currently targets Bluesky. It searches multilingual
-flood-related keywords, stores retained posts in `raw.social_media_posts`,
-normalizes them into `staging.social_flood_signals`, and exposes them through
-the social marts and API routes listed above.
+```bash
+# inside .venv, from project root
+pip install -r requirements/dev.txt
+pytest                              # runs all 117 tests
+pytest tests/test_transform.py -v   # one module
+pytest -k bluesky                   # by keyword
+```
 
-## 9. Known limitations
+Test inventory (`tests/`):
 
-- **GloFAS reanalysis grids** are **not** ingested today. The file named
-  `ingestion/ingest_glofas.py` actually pulls the Dartmouth Flood
-  Observatory live MasterList — a different vintage of the same archive
-  that `ingest_dartmouth.py` reads from HDX. Both are surfaced as the
-  `Dartmouth_FO` and `Dartmouth_MasterList` sources respectively, and the
-  `marts.flood_events_unique` view dedupes their large Register#-overlap.
-  A real Copernicus GloFAS branch can be wired via the CDS API.
-- **EM-DAT** requires a free user account; bulk download is gated behind
-  a session cookie. The pipeline ships with a CSV seed and accepts a
-  signed URL via `EMDAT_DOWNLOAD_URL`.
-- **Copernicus EMS** does not publish a stable public JSON feed of
-  activations. We use the bundled CSV (`activations.csv`) plus an
-  optional `COPERNICUS_EMS_FEED_URL` override.
-- **Polygon geometries**: only point geometries are persisted today.
-  When polygon shapefiles are available, store the polygon and use its
-  centroid for H3 indexing — this is documented inline in `transform.py`.
-- **DFO `Displaced` semantics**: DFO's `Displaced` column is broader
-  than "permanently displaced" (it includes precautionary evacuees and
-  exposed populations). Compare per-event values against EM-DAT for a
-  stricter definition.
-- **Social-media precision**: Bluesky posts are public situational signals,
-  not authoritative disaster records. The pipeline uses flood keywords,
-  context terms, political/metaphorical exclusion rules, confidence scores,
-  and lightweight place-name inference to reduce noise, but high-impact
-  signals should still be cross-checked against authoritative sources.
-- **Social-media geolocation**: Most public posts do not include exact
-  coordinates. The current implementation infers country/place only when the
-  text contains reliable country, adjective, US state, timezone, or city-state
-  patterns. H3 indexing is only available when coordinates exist.
+| File                          | Functions |
+| ----------------------------- | --------: |
+| `test_db_client.py`           |        16 |
+| `test_ingest_bluesky.py`      |        26 |
+| `test_ingestion_common.py`    |        10 |
+| `test_social_geo.py`          |        11 |
+| `test_transform.py`           |        54 |
+| **Total**                     |   **117** |
 
-## 10. Recommended next steps
+### Data-quality checks (15)
 
-1. Add a real CDS-API GloFAS branch into a separate raw table
-   (`raw.glofas_reanalysis`) and a separate `_normalize_glofas_reanalysis`
-   function. The placeholder is already in `ingest_glofas.py`.
-2. Replace the `SequentialExecutor` with `LocalExecutor` + a Postgres
-   metadata DB once the workload exceeds one task at a time.
-3. Add Great Expectations / Soda checks alongside `data_quality.py`.
-4. Re-evaluate the dedupe strategy in `marts.flood_events_unique` if a
-   future source publishes events under non-DFO IDs that nonetheless
-   cover the same floods (currently we only dedupe across the DFO
-   Register# space).
-5. Expand social-media ingestion beyond Bluesky with source-specific adapters
-   that write into the same `raw.social_media_posts` contract.
-6. Replace the lightweight rule-based social geocoder with a gazetteer-backed
-   or NER-based approach for better place extraction and event matching.
+```bash
+python -m validation.data_quality
+cat data/logs/data_quality_report.md
+```
+
+The 15 checks are defined as `(name, SQL)` tuples in
+[`validation/data_quality.py`](./validation/data_quality.py):
+
+**Flood-event checks (7):** `duplicate_source_event_ids`,
+`missing_date_start`, `invalid_latitude_or_longitude`, `invalid_geometry`,
+`missing_source`, `missing_h3_with_coords`, `severity_out_of_range`.
+
+**Social-signal checks (8):** `social_duplicate_platform_post_ids`,
+`social_missing_created_at`, `social_missing_platform_or_post_id`,
+`social_invalid_latitude_or_longitude`, `social_missing_h3_with_coords`,
+`social_confidence_out_of_range`, `social_relevance_without_keywords`,
+`social_orphan_staging_signals`.
+
+The DQ task uses `trigger_rule="all_done"` so it runs even if an upstream
+ingestion fails — you always get a report.
+
+---
+
+## 12. Analytical outputs (notebooks)
+
+```bash
+pip install -r requirements/notebooks.txt
+jupyter lab notebooks/time_series_analysis.ipynb
+```
+
+`notebooks/time_series_analysis.ipynb` covers:
+
+- Monthly event time-series construction from `marts.flood_events_by_month`
+- Seasonal decomposition (STL) per region
+- Per-basin frequency trend lines from `marts.flood_frequency_by_basin`
+- Cross-source corroboration counts joined with `marts.flood_events_with_social_signals`
+
+---
+
+## 13. Troubleshooting
+
+| Symptom                                                              | Likely cause                                      | Fix                                                                                                            |
+| -------------------------------------------------------------------- | ------------------------------------------------- | -------------------------------------------------------------------------------------------------------------- |
+| `sqlalchemy.exc.OperationalError: could not connect to server`       | Wrong `DATABASE_URL` or DB not reachable          | Verify `psql "$DATABASE_URL"` works from your shell.                                                           |
+| API returns `503 Mart X is not available yet`                        | DAG has not finished                              | Trigger the DAG once or run `python -m transformations.marts` locally.                                         |
+| `extension "postgis" is not available`                               | PostGIS not installed in your DB                  | Use Supabase (PostGIS pre-installed) or run `CREATE EXTENSION postgis;` as a superuser.                        |
+| Airflow UI shows DAG paused on every restart                         | Default Airflow behaviour                         | Toggle the DAG on, or set `AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION=False` in `docker-compose.yml`.          |
+| Port 8081 / 8000 already in use                                      | Another process owns the port                     | Edit the `ports:` mapping in `docker-compose.yml`.                                                             |
+| `ImportError: cannot import name '...' from 'h3'`                    | h3 version mismatch                               | The pipeline pins `h3==3.7.7` (pure-Python). Re-create the venv with `requirements/base.txt`.                  |
+| Bluesky ingestion logs `401 Unauthorized`                            | App Password missing / invalid                    | Create a new App Password at <https://bsky.app/settings/app-passwords> and update `.env`.                      |
+| `pre_ping` errors against Supabase                                   | pgBouncer transaction-pool quirks                 | `db/client.py` already sets `pool_pre_ping=True`, `pool_recycle=300s`. If it persists, increase `pool_recycle`. |
+
+---
+
+## 14. Known limitations
+
+- **GloFAS reanalysis grids** are **not** ingested today. The file
+  `ingestion/ingest_glofas.py` actually pulls the Dartmouth Flood Observatory
+  live MasterList. A real Copernicus GloFAS branch can be wired via the CDS API
+  using `CDS_API_URL` / `CDS_API_KEY`.
+- **EM-DAT** requires a free user account; bulk download is gated behind a
+  session cookie. The pipeline ships with a CSV seed and accepts a signed URL
+  via `EMDAT_DOWNLOAD_URL`.
+- **Copernicus EMS** has no stable public JSON feed. We use the bundled
+  `activations.csv` plus an optional `COPERNICUS_EMS_FEED_URL` override.
+- **Polygon geometries** are not persisted today; only point centroids.
+- **DFO `Displaced` semantics** include precautionary evacuees — strict
+  "displaced" counts should be compared against EM-DAT.
+- **Social-media precision**: Bluesky posts are situational signals, not
+  authoritative records. A 4-layer filter (29 keywords, 37 context terms,
+  40 exclusion phrases, 3 regex patterns) reduces noise but cannot eliminate it.
+- **Geolocation without GPS** is rule-based (country/adjective/US-state/
+  city-state/timezone). Confidence ranges from 0.35 to 1.0.
+- **Executor**: `SequentialExecutor` runs one task at a time. Switch to
+  `LocalExecutor` with a Postgres metadata DB when workload grows.
+
+---
+
+## 15. License
+
+This project is currently in a research-validation phase and ships without a
+license declaration. Adopt MIT or Apache 2.0 before public distribution.
+
+---
+
+*Maintainer: Group G7 — Final Year Project Propositions, Academic Year 2025-2026
+| Instructor: Dr. Meziane Iftene.*
