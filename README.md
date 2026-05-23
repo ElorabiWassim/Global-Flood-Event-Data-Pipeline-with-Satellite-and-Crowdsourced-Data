@@ -26,8 +26,7 @@ dashboard, orchestrated by **Apache Airflow** and modeled with **dbt**.
 11. [Testing & data quality](#11-testing--data-quality)
 12. [Analytical outputs (notebooks)](#12-analytical-outputs-notebooks)
 13. [Troubleshooting](#13-troubleshooting)
-14. [Known limitations](#14-known-limitations)
-15. [License](#15-license)
+14. [License](#15-license)
 
 ---
 
@@ -550,36 +549,20 @@ jupyter lab notebooks/time_series_analysis.ipynb
 
 ---
 
-## 14. Known limitations
+## 14. License
 
-- **GloFAS reanalysis grids** are **not** ingested today. The file
-  `ingestion/ingest_glofas.py` actually pulls the Dartmouth Flood Observatory
-  live MasterList. A real Copernicus GloFAS branch can be wired via the CDS API
-  using `CDS_API_URL` / `CDS_API_KEY`.
-- **EM-DAT** requires a free user account; bulk download is gated behind a
-  session cookie. The pipeline ships with a CSV seed and accepts a signed URL
-  via `EMDAT_DOWNLOAD_URL`.
-- **Copernicus EMS** has no stable public JSON feed. We use the bundled
-  `activations.csv` plus an optional `COPERNICUS_EMS_FEED_URL` override.
-- **Polygon geometries** are not persisted today; only point centroids.
-- **DFO `Displaced` semantics** include precautionary evacuees — strict
-  "displaced" counts should be compared against EM-DAT.
-- **Social-media precision**: Bluesky posts are situational signals, not
-  authoritative records. A 4-layer filter (29 keywords, 37 context terms,
-  40 exclusion phrases, 3 regex patterns) reduces noise but cannot eliminate it.
-- **Geolocation without GPS** is rule-based (country/adjective/US-state/
-  city-state/timezone). Confidence ranges from 0.35 to 1.0.
-- **Executor**: `SequentialExecutor` runs one task at a time. Switch to
-  `LocalExecutor` with a Postgres metadata DB when workload grows.
 
----
+The source code in this repository is licensed under the Apache License 2.0. See the [LICENSE](LICENSE) file for details.
 
-## 15. License
-
-This project is currently in a research-validation phase and ships without a
-license declaration. Adopt MIT or Apache 2.0 before public distribution.
+Datasets are not included in this repository and remain subject to their original licenses.
 
 ---
 
 *Maintainer: Group G7 — Final Year Project Propositions, Academic Year 2025-2026
+Elorabi Wassim ( Team Lead ) 
+Boucenna Rabah 
+Kaizra Yacine 
+Khaled Mohammed
+Chadli Mohamed Abdelillah
+
 | Instructor: Dr. Meziane Iftene.*
