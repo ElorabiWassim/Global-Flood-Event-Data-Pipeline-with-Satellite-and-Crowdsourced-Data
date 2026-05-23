@@ -1,0 +1,179 @@
+// =============================================================================
+// Global Flood Event Data Pipeline - PostGIS ERD (DBML format)
+//
+// Paste this file into https://dbdiagram.io to export PNG/PDF/SVG.
+// Source of truth: db/schema.sql
+// =============================================================================
+
+Project flood_pipeline {
+  database_type: 'PostgreSQL'
+  Note: 'Medallion warehouse: raw -> staging -> marts'
+}
+
+// -----------------------------------------------------------------------------
+// raw schema
+// -----------------------------------------------------------------------------
+Table raw.dartmouth_events {
+  id            bigserial   [pk]
+  source        text        [not null]
+  source_url    text
+  file_path     text
+  batch_id      text        [not null]
+  ingested_at   timestamptz [not null, default: `now()`]
+  payload       jsonb       [not null]
+}
+
+Table raw.glofas_events {
+  id            bigserial   [pk]
+  source        text        [not null]
+  source_url    text
+  file_path     text
+  batch_id      text        [not null]
+  ingested_at   timestamptz [not null, default: `now()`]
+  payload       jsonb       [not null]
+}
+
+Table raw.copernicus_ems_events {
+  id            bigserial   [pk]
+  source        text        [not null]
+  source_url    text
+  file_path     text
+  batch_id      text        [not null]
+  ingested_at   timestamptz [not null, default: `now()`]
+  payload       jsonb       [not null]
+}
+
+Table raw.emdat_events {
+  id            bigserial   [pk]
+  source        text        [not null]
+  source_url    text
+  file_path     text
+  batch_id      text        [not null]
+  ingested_at   timestamptz [not null, default: `now()`]
+  payload       jsonb       [not null]
+}
+
+Table raw.reliefweb_events {
+  id            bigserial   [pk]
+  source        text        [not null]
+  source_url    text
+  file_path     text
+  batch_id      text        [not null]
+  ingested_at   timestamptz [not null, default: `now()`]
+  payload       jsonb       [not null]
+}
+
+Table raw.social_media_posts {
+  id            bigserial   [pk]
+  platform      text        [not null]
+  source        text        [not null]
+  source_url    text
+  post_id       text        [not null]
+  file_path     text
+  batch_id      text        [not null]
+  ingested_at   timestamptz [not null, default: `now()`]
+  payload       jsonb       [not null]
+
+  indexes {
+    (platform, post_id) [unique, name: 'uq_social_media_posts_platform_post']
+    platform
+    ingested_at
+  }
+}
+
+Table raw.ingestion_log {
+  id              bigserial   [pk]
+  batch_id        text        [not null]
+  source          text        [not null]
+  source_url      text
+  file_path       text
+  file_checksum   text
+  rows_ingested   integer
+  status          text        [not null, note: 'success | failure | skipped']
+  message         text
+  started_at      timestamptz [not null, default: `now()`]
+  finished_at     timestamptz
+}
+
+// -----------------------------------------------------------------------------
+// staging schema (canonical model)
+// -----------------------------------------------------------------------------
+Table staging.flood_events {
+  id                  serial      [pk]
+  source              text        [not null]
+  source_event_id     text
+  event_name          text
+  main_cause          text
+  date_start          timestamp   [not null]
+  date_end            timestamp
+  country             text
+  river_basin         text
+  latitude            double
+  longitude           double
+  geometry            "geometry(Point,4326)"
+  deaths              integer
+  displaced           integer
+  affected            integer
+  severity            double
+  flood_impact_index  double
+  glide_number        text
+  url                 text
+  h3_index            text        [note: 'Uber H3 resolution 7']
+  loaded_at           timestamptz [not null, default: `now()`]
+
+  indexes {
+    (source, source_event_id) [unique, name: 'uq_flood_events_source']
+    country
+    river_basin
+    date_start
+    severity
+    h3_index
+    geometry [type: gist]
+  }
+}
+
+Table staging.social_flood_signals {
+  id                      bigserial   [pk]
+  platform                text        [not null]
+  post_id                 text        [not null]
+  source_event_id         text
+  created_at              timestamptz [not null]
+  ingested_at             timestamptz
+  text                    text
+  language                text
+  url                     text
+  author_id_hash          text
+  matched_keywords        "text[]"
+  excluded_keywords       "text[]"
+  flood_relevance_score   double
+  location_confidence     double
+  signal_confidence       double
+  place_name              text
+  country                 text
+  latitude                double
+  longitude               double
+  geometry                "geometry(Point,4326)"
+  h3_index                text
+  raw_payload             jsonb
+  loaded_at               timestamptz [not null, default: `now()`]
+
+  indexes {
+    (platform, post_id) [unique, name: 'uq_social_flood_signals_platform_post']
+    platform
+    created_at
+    country
+    h3_index
+    signal_confidence
+    geometry [type: gist]
+  }
+}
+
+// -----------------------------------------------------------------------------
+// Logical lineage (no declared FKs - JSONB is parsed by transform.py)
+// -----------------------------------------------------------------------------
+Ref: staging.flood_events.source_event_id        > raw.dartmouth_events.id        [delete: no action]
+Ref: staging.flood_events.source_event_id        > raw.glofas_events.id           [delete: no action]
+Ref: staging.flood_events.source_event_id        > raw.copernicus_ems_events.id   [delete: no action]
+Ref: staging.flood_events.source_event_id        > raw.emdat_events.id            [delete: no action]
+Ref: staging.flood_events.source_event_id        > raw.reliefweb_events.id        [delete: no action]
+Ref: staging.social_flood_signals.post_id        > raw.social_media_posts.post_id [delete: no action]
