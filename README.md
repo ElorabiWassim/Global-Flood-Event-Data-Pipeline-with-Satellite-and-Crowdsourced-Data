@@ -26,8 +26,7 @@ dashboard, orchestrated by **Apache Airflow** and modeled with **dbt**.
 11. [Testing & data quality](#11-testing--data-quality)
 12. [Analytical outputs (notebooks)](#12-analytical-outputs-notebooks)
 13. [Troubleshooting](#13-troubleshooting)
-14. [Known limitations](#14-known-limitations)
-15. [License](#15-license)
+14. [License](#15-license)
 
 ---
 
