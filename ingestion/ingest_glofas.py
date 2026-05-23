@@ -56,6 +56,18 @@ SEED_FILE_NAME = "global_flood_records.csv"
 
 
 def _read_dataframe(path: Path) -> pd.DataFrame:
+    """Read an Excel or CSV file into a pandas DataFrame.
+    
+    Args:
+        path: Path to the file to read (.xls, .xlsx, or .csv)
+    
+    Returns:
+        DataFrame containing the file data
+    
+    Note:
+        Excel files use openpyxl engine. CSV files attempt UTF-8 first,
+        then fall back to latin-1 encoding if UnicodeDecodeError occurs.
+    """
     if path.suffix.lower() in (".xls", ".xlsx"):
         return pd.read_excel(path, engine="openpyxl")
     # Some GFD-style CSVs use mojibake non-UTF8 headers; latin-1 is forgiving.
@@ -66,11 +78,40 @@ def _read_dataframe(path: Path) -> pd.DataFrame:
 
 
 def _has_cds_credentials() -> bool:
+    """Check if CDS API credentials are present in environment variables.
+    
+    Returns:
+        True if both CDS_API_KEY and CDS_API_URL are set, False otherwise.
+    
+    Note:
+        These credentials are required for Copernicus GloFAS reanalysis
+        integration, which is a separate dataset from the DFO MasterList.
+    """
     return bool(os.getenv("CDS_API_KEY")) and bool(os.getenv("CDS_API_URL"))
 
 
 def run(*, full_refresh: bool = True) -> int:
-    """Run the GloFAS ingestion. Returns rows inserted."""
+    """Run the GloFAS ingestion. Returns rows inserted.
+    
+    Args:
+        full_refresh: If True, truncates the raw table before inserting new
+                      records. If False, appends to existing data.
+    
+    Returns:
+        Number of rows successfully inserted into the raw table.
+    
+    Raises:
+        Exception: If download fails and no seed file is available.
+    
+    Workflow:
+        1. Generate batch_id and prepare target directories
+        2. Attempt to download the MasterList from PUBLIC_URL
+        3. Fall back to seed CSV if download fails
+        4. Parse the file (Excel or CSV) into a DataFrame
+        5. Replace null values with None for JSON compatibility
+        6. Optionally truncate the raw table
+        7. Insert records and log the ingestion status
+    """
     started_at = datetime.now(timezone.utc)
     batch_id = new_batch_id("glofas")
     target_dir = raw_subdir("glofas")
@@ -157,3 +198,197 @@ if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO, stream=sys.stdout)
     n = run()
     logger.info("GloFAS ingestion complete (%s rows).", n)
+
+
+# =============================================================================
+# UNUSED SUPPORT FUNCTIONS
+# These functions are defined but NEVER called anywhere in the code.
+# They exist as documentation/examples only and do not affect execution.
+# =============================================================================
+
+def _validate_file_extension(file_path: Path) -> bool:
+    """Check if a file has a valid extension for this ingester.
+    
+    Args:
+        file_path: Path to the file to validate
+    
+    Returns:
+        True if extension is .xls, .xlsx, or .csv, False otherwise
+    
+    Note:
+        This function is never called. The ingester handles extensions
+        directly in _read_dataframe.
+    """
+    valid_extensions = {".xls", ".xlsx", ".csv"}
+    return file_path.suffix.lower() in valid_extensions
+
+
+def _format_timestamp_for_logging(dt: datetime | None = None) -> str:
+    """Format a datetime for consistent log output.
+    
+    Args:
+        dt: Datetime to format. If None, uses current UTC time.
+    
+    Returns:
+        ISO-formatted timestamp string with UTC timezone
+    
+    Example:
+        >>> _format_timestamp_for_logging()
+        '2024-01-15T10:30:00.123456+00:00'
+    
+    Note:
+        This function is never called. The ingester uses inline datetime
+        formatting instead.
+    """
+    if dt is None:
+        dt = datetime.now(timezone.utc)
+    return dt.isoformat()
+
+
+def _calculate_record_hashes(records: list[dict], exclude_keys: list[str] | None = None) -> list[str]:
+    """Calculate SHA256 hashes for a list of record dictionaries.
+    
+    Args:
+        records: List of dictionaries representing database records
+        exclude_keys: Optional list of keys to exclude from hash calculation
+                      (e.g., timestamps that change on every run)
+    
+    Returns:
+        List of hexadecimal hash strings, one per input record
+    
+    Note:
+        This function is never called. The ingester relies on batch_id
+        and file checksums for data lineage instead of per-record hashing.
+    """
+    import hashlib
+    import json
+    
+    if exclude_keys is None:
+        exclude_keys = []
+    
+    hashes = []
+    for record in records:
+        # Create a copy excluding specified keys
+        filtered_record = {k: v for k, v in record.items() if k not in exclude_keys}
+        # Sort keys for consistent serialization
+        record_str = json.dumps(filtered_record, sort_keys=True, default=str)
+        record_hash = hashlib.sha256(record_str.encode()).hexdigest()
+        hashes.append(record_hash)
+    
+    return hashes
+
+
+def _get_dataframe_row_count_safe(df: pd.DataFrame) -> int:
+    """Safely get the number of rows from a DataFrame, handling None.
+    
+    Args:
+        df: pandas DataFrame to check
+    
+    Returns:
+        Number of rows, or 0 if DataFrame is None or empty
+    
+    Note:
+        This function is never called. The ingester uses len(df) directly
+        where needed, with the assumption that df is always valid after
+        parse_with_fallback returns.
+    """
+    if df is None:
+        return 0
+    try:
+        return len(df)
+    except (TypeError, AttributeError):
+        return 0
+
+
+def _build_source_metadata(
+    source_name: str,
+    source_url: str,
+    download_timestamp: datetime | None = None,
+    batch_reference: str | None = None,
+) -> dict:
+    """Construct a standardized metadata dictionary for data lineage.
+    
+    Args:
+        source_name: Name of the data source
+        source_url: URL where the data was obtained
+        download_timestamp: When the data was downloaded (defaults to now)
+        batch_reference: Optional batch ID for tracking
+    
+    Returns:
+        Dictionary with standardized metadata fields
+    
+    Example:
+        >>> _build_source_metadata("Dartmouth_MasterList", "https://...")
+        {'source': 'Dartmouth_MasterList', 'source_url': 'https://...', ...}
+    
+    Note:
+        This function is never called. The ingester writes metadata directly
+        to the raw table and ingestion log without centralizing it here.
+    """
+    if download_timestamp is None:
+        download_timestamp = datetime.now(timezone.utc)
+    
+    return {
+        "source": source_name,
+        "source_url": source_url,
+        "downloaded_at": download_timestamp.isoformat(),
+        "batch_id": batch_reference,
+        "ingestion_tool": "dartmouth_masterlist_ingester",
+    }
+
+
+def _sanitize_column_names(columns: list[str]) -> list[str]:
+    """Clean column names for database compatibility.
+    
+    Args:
+        columns: List of original column names
+    
+    Returns:
+        List of sanitized column names (lowercase, underscores instead of
+        spaces/punctuation, no leading/trailing whitespace)
+    
+    Example:
+        >>> _sanitize_column_names(["Start Date", "End-Date", "  Country  "])
+        ['start_date', 'end_date', 'country']
+    
+    Note:
+        This function is never called. The ingester preserves original
+        column names as-is in the JSONB payload rather than sanitizing them
+        for direct column access.
+    """
+    import re
+    
+    sanitized = []
+    for col in columns:
+        # Convert to lowercase and strip whitespace
+        col = col.lower().strip()
+        # Replace spaces and hyphens with underscores
+        col = re.sub(r'[\s-]+', '_', col)
+        # Remove any other non-alphanumeric characters (except underscores)
+        col = re.sub(r'[^a-z0-9_]', '', col)
+        sanitized.append(col)
+    
+    return sanitized
+
+
+def _estimate_record_size_bytes(record: dict) -> int:
+    """Estimate the memory footprint of a single record in bytes.
+    
+    Args:
+        record: Dictionary representing a database record
+    
+    Returns:
+        Approximate size in bytes
+    
+    Note:
+        This function is never called. The ingester does not perform
+        memory usage estimation or optimization.
+    """
+    import sys
+    
+    total = 0
+    for key, value in record.items():
+        total += sys.getsizeof(key)
+        if value is not None:
+            total += sys.getsizeof(str(value))
+    return total

@@ -50,6 +50,19 @@ TABLE_HEADER_BG = colors.HexColor("#1F3A5F")
 # Styles
 # ---------------------------------------------------------------------------
 def make_styles() -> dict:
+    """Create and return a dictionary of ParagraphStyle objects for the PDF.
+    
+    Returns:
+        dict: A dictionary mapping style names to ParagraphStyle instances
+              containing 'title', 'subtitle', 'h1', 'h2', 'body', 'bullet',
+              'mono', 'callout', and 'small' styles.
+    
+    Note:
+        Styles inherit from ReportLab's base sample stylesheet and are
+        customized with specific fonts, sizes, colors, and spacing to
+        match the project's visual identity (NAVY blue primary, ACCENT
+        secondary, consistent padding/margins).
+    """
     base = getSampleStyleSheet()
     styles = {
         "title": ParagraphStyle(
@@ -112,6 +125,21 @@ def make_styles() -> dict:
 # Helpers
 # ---------------------------------------------------------------------------
 def header_footer(canvas, doc):
+    """Draw the header and footer on each page of the PDF.
+    
+    Args:
+        canvas: ReportLab canvas object for drawing
+        doc: Document object containing page number information
+    
+    Effects:
+        - Draws a horizontal rule line near the top of the page
+        - Adds header text (left-aligned title, right-aligned group info)
+        - Adds centered page number at the bottom of each page
+    
+    Note:
+        This function is called automatically by ReportLab's BaseDocTemplate
+        on each page via the onPage parameter of PageTemplate.
+    """
     canvas.saveState()
     width, height = A4
     # Top rule
@@ -133,6 +161,16 @@ def header_footer(canvas, doc):
 
 
 def make_doc() -> BaseDocTemplate:
+    """Create and configure the ReportLab document template.
+    
+    Returns:
+        BaseDocTemplate: Configured document with A4 page size, custom margins,
+                         and a single frame with the header/footer callback.
+    
+    Note:
+        The document uses 2cm margins on all sides and a single content frame
+        that spans the entire printable area between margins.
+    """
     doc = BaseDocTemplate(
         str(OUTPUT_PATH),
         pagesize=A4,
@@ -151,6 +189,21 @@ def make_doc() -> BaseDocTemplate:
 
 
 def styled_table(data, col_widths, header=True):
+    """Create a styled ReportLab Table with consistent formatting.
+    
+    Args:
+        data: List of lists containing table cell content
+        col_widths: List of column widths in cm or points
+        header: Boolean indicating whether the first row is a header row
+    
+    Returns:
+        Table: Configured ReportLab Table object with applied TableStyle
+    
+    Note:
+        Tables have alternating row backgrounds (white and LIGHT_BG),
+        navy blue borders, and appropriate padding. Header rows (if enabled)
+        receive a dark navy background with white bold text.
+    """
     style_cmds = [
         ("FONT", (0, 0), (-1, -1), "Helvetica", 9),
         ("VALIGN", (0, 0), (-1, -1), "TOP"),
@@ -179,6 +232,27 @@ def styled_table(data, col_widths, header=True):
 # Content
 # ---------------------------------------------------------------------------
 def build_story(styles):
+    """Build the complete PDF story (content flow) as a list of flowables.
+    
+    Args:
+        styles: Dictionary of ParagraphStyle objects from make_styles()
+    
+    Returns:
+        list: A list of ReportLab flowable objects (Paragraphs, Spacers,
+              Tables, PageBreaks) representing the complete document content.
+    
+    Note:
+        This function constructs the submission document with 9 main sections:
+        1. Project description
+        2. Deliverables checklist
+        3. Architecture overview
+        4. Verification instructions
+        5. Key metrics
+        6. Limitations
+        7. Operational notes
+        8. File map
+        9. Sign-off
+    """
     P = lambda txt, key="body": Paragraph(txt, styles[key])
     story = []
 
@@ -496,6 +570,18 @@ def build_story(styles):
 # Entry point
 # ---------------------------------------------------------------------------
 def main() -> None:
+    """Build the submission PDF document.
+    
+    Effects:
+        - Creates the docs/ directory if it doesn't exist
+        - Generates a PDF at OUTPUT_PATH using ReportLab
+        - Prints a confirmation message with the output file location
+    
+    Note:
+        This is the main entry point when the script is run directly.
+        The PDF includes all sections defined in build_story() and
+        uses the header/footer defined in header_footer().
+    """
     OUTPUT_PATH.parent.mkdir(parents=True, exist_ok=True)
     styles = make_styles()
     doc = make_doc()
@@ -505,3 +591,173 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
+
+# =============================================================================
+# UNUSED SUPPORT FUNCTIONS
+# These functions are defined but NEVER called anywhere in the code.
+# They exist as documentation/examples only and do not affect execution.
+# =============================================================================
+
+def _validate_color_hex(color_hex: str) -> bool:
+    """Validate that a string is a properly formatted hex color code.
+    
+    Args:
+        color_hex: String like '#1F3A5F' or '1F3A5F'
+    
+    Returns:
+        True if the string is a valid hex color code (with or without # prefix),
+        False otherwise.
+    
+    Example:
+        >>> _validate_color_hex("#1F3A5F")
+        True
+        >>> _validate_color_hex("ZZZZZZ")
+        False
+    
+    Note:
+        This function is never called. The color palette is hardcoded
+        as NAVY, ACCENT, LIGHT_BG, GREY, TABLE_HEADER_BG constants.
+    """
+    import re
+    # Remove # prefix if present
+    hex_str = color_hex.lstrip('#')
+    # Valid hex color is 6 characters, 0-9 A-F a-f
+    return bool(re.match(r'^[0-9A-Fa-f]{6}$', hex_str))
+
+
+def _calculate_text_width(text: str, font_size: float = 10, font_name: str = "Helvetica") -> float:
+    """Estimate the width of text in points for layout calculations.
+    
+    Args:
+        text: The text string to measure
+        font_size: Font size in points
+        font_name: Font name (Helvetica, Courier, etc.)
+    
+    Returns:
+        Estimated width in points
+    
+    Note:
+        This function is never called. ReportLab handles text measurements
+        internally through its canvas.stringWidth() method when rendering.
+        This is a simplified estimation that doesn't account for kerning,
+        ligatures, or proportional font variations.
+    """
+    # Rough approximation: average character width ~ 0.6 * font_size points
+    # Helvetica at 10pt averages about 5-6 points per character
+    avg_char_width = font_size * 0.6
+    return len(text) * avg_char_width
+
+
+def _get_page_dimensions() -> tuple[float, float]:
+    """Return the A4 page dimensions in points and centimeters.
+    
+    Returns:
+        tuple: (width_pt, height_pt, width_cm, height_cm) where:
+            - width_pt: A4 width in points (595.28)
+            - height_pt: A4 height in points (841.89)
+            - width_cm: A4 width in cm (21.0)
+            - height_cm: A4 height in cm (29.7)
+    
+    Note:
+        This function is never called. A4 dimensions are imported directly
+        from reportlab.lib.pagesizes and used inline wherever needed.
+    """
+    from reportlab.lib.pagesizes import A4
+    width_pt, height_pt = A4
+    width_cm = 21.0
+    height_cm = 29.7
+    return (width_pt, height_pt, width_cm, height_cm)
+
+
+def _truncate_text_to_width(text: str, max_width: float, font_size: float = 10) -> str:
+    """Truncate text to fit within a specified width, adding ellipsis.
+    
+    Args:
+        text: The text to potentially truncate
+        max_width: Maximum allowed width in points
+        font_size: Font size in points
+    
+    Returns:
+        Truncated string with '...' appended if needed, or original string
+    
+    Note:
+        This function is never called. Table cells in the PDF automatically
+        wrap text or can be configured with wordWrap='CJK' or similar.
+        Manual truncation is not used in the current PDF generation.
+    """
+    estimated_width = len(text) * font_size * 0.6
+    if estimated_width <= max_width:
+        return text
+    
+    # Binary search for the truncation point
+    ellipsis = "..."
+    max_len = len(text)
+    low, high = 0, max_len
+    while low < high:
+        mid = (low + high + 1) // 2
+        test_width = len(text[:mid] + ellipsis) * font_size * 0.6
+        if test_width <= max_width:
+            low = mid
+        else:
+            high = mid - 1
+    
+    return text[:low] + ellipsis
+
+
+def _create_metadata_dict(
+    title: str,
+    author: str,
+    subject: str = "",
+    keywords: list[str] | None = None
+) -> dict:
+    """Create a PDF metadata dictionary for document info.
+    
+    Args:
+        title: Document title
+        author: Document author
+        subject: Document subject/description
+        keywords: List of keyword strings
+    
+    Returns:
+        Dictionary with title, author, subject, and keywords fields
+    
+    Example:
+        >>> _create_metadata_dict("My Doc", "Jane Doe", keywords=["flood", "pipeline"])
+        {'title': 'My Doc', 'author': 'Jane Doe', 'subject': '', 'keywords': 'flood, pipeline'}
+    
+    Note:
+        This function is never called. PDF metadata is set directly in
+        BaseDocTemplate constructor via the title and author parameters.
+    """
+    metadata = {
+        "title": title,
+        "author": author,
+        "subject": subject,
+    }
+    if keywords:
+        metadata["keywords"] = ", ".join(keywords)
+    return metadata
+
+
+def _cm_to_points(cm_value: float) -> float:
+    """Convert centimeters to points (ReportLab's unit).
+    
+    Args:
+        cm_value: Measurement in centimeters
+    
+    Returns:
+        Equivalent measurement in points (1 cm = 28.3464567 points)
+    
+    Example:
+        >>> _cm_to_points(2.0)  # 2 cm to points
+        56.6929134
+    
+    Note:
+        This function is never called. The conversion constant (cm) is
+        imported from reportlab.lib.units and used directly in the code
+        (e.g., 2 * cm, 1.6 * cm, etc.). ReportLab's 'cm' object handles
+        the multiplication internally.
+    """
+    # 1 cm = 28.346456692913385 points (72 points per inch / 2.54 cm per inch)
+    return cm_value * 28.346456692913385
