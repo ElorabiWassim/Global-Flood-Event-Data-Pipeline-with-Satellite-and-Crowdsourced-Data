@@ -551,8 +551,10 @@ jupyter lab notebooks/time_series_analysis.ipynb
 
 ## 14. License
 
-This project is currently in a research-validation phase and ships without a
-license declaration.
+
+The source code in this repository is licensed under the Apache License 2.0. See the [LICENSE](LICENSE) file for details.
+
+Datasets are not included in this repository and remain subject to their original licenses.
 
 ---
 
